@@ -1,0 +1,2 @@
+GET http://127.0.0.1:8080/v1/token/REPLACE_CATEGORY/holders/top?n=50
+GET http://127.0.0.1:8080/v1/token/REPLACE_CATEGORY/holders?limit=100

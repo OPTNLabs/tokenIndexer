@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+
+# Environment files (keep examples committed)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# IDE/editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
