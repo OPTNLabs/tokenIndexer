@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::env;
+use url::Url;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "tokenindex")]
@@ -338,6 +339,60 @@ impl Config {
         cfg.expected_chain = "main".to_string();
         Ok(Some(cfg))
     }
+
+    pub fn startup_snapshot(&self) -> StartupSnapshot {
+        StartupSnapshot {
+            api_bind: format!("{}:{}", self.api_host, self.api_port),
+            db_schema: self.db_schema.clone(),
+            database_url: redact_url(&self.database_url),
+            database_read_url: self.database_read_url.as_deref().map(redact_url),
+            rpc_url: redact_url(&self.rpc_url),
+            redis_enabled: self.redis_url.is_some(),
+            zmq_enabled: self.zmq_block_endpoint.is_some(),
+            mempool_enabled: self.mempool_enabled,
+            bcmr_enabled: self.bcmr_enabled,
+            reconcile_enabled: self.reconcile_enabled,
+            bootstrap_height: self.bootstrap_height,
+            log_level: self.log_level.clone(),
+            expected_chain: self.expected_chain.clone(),
+            db_pool_max_connections: self.db_max_connections,
+            db_api_pool_max_connections: self.api_db_pool_size(),
+            db_ingest_pool_max_connections: self.ingest_db_pool_size(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StartupSnapshot {
+    pub api_bind: String,
+    pub db_schema: String,
+    pub database_url: String,
+    pub database_read_url: Option<String>,
+    pub rpc_url: String,
+    pub redis_enabled: bool,
+    pub zmq_enabled: bool,
+    pub mempool_enabled: bool,
+    pub bcmr_enabled: bool,
+    pub reconcile_enabled: bool,
+    pub bootstrap_height: i32,
+    pub log_level: String,
+    pub expected_chain: String,
+    pub db_pool_max_connections: u32,
+    pub db_api_pool_max_connections: u32,
+    pub db_ingest_pool_max_connections: u32,
+}
+
+fn redact_url(raw: &str) -> String {
+    let Ok(mut parsed) = Url::parse(raw) else {
+        return "<invalid-url>".to_string();
+    };
+    if !parsed.username().is_empty() {
+        let _ = parsed.set_username("****");
+    }
+    if parsed.password().is_some() {
+        let _ = parsed.set_password(Some("****"));
+    }
+    parsed.to_string()
 }
 
 fn apply_chipnet_aliases() {
