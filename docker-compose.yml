@@ -1,6 +1,9 @@
 services:
   tokenindex:
-    build: .
+    build:
+      context: .
+      args:
+        CARGO_PROFILE: docker-release
     container_name: tokenindex
     restart: unless-stopped
     env_file:

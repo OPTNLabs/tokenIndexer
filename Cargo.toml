@@ -40,3 +40,9 @@ serde_path_to_error = "0.1"
 [profile.release]
 lto = true
 codegen-units = 1
+strip = true
+
+[profile.docker-release]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
