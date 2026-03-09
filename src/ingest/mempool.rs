@@ -7,7 +7,7 @@ use num_bigint::BigInt;
 use num_traits::Zero;
 use serde_json::json;
 use tokio::sync::RwLock;
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
 
 use crate::config::Config;
@@ -67,47 +67,87 @@ struct HolderAcc {
     utxo_delta: i32,
 }
 
+#[derive(Debug, Default)]
+struct MempoolState {
+    parsed_txs: HashMap<String, ParsedTx>,
+    prevout_cache: HashMap<String, Option<OutpointTokenRef>>,
+}
+
 impl MempoolWorker {
-    pub fn new(config: Config, db: Database, snapshot: Arc<RwLock<MempoolSnapshot>>) -> Self {
+    pub fn new(
+        config: Config,
+        db: Database,
+        snapshot: Arc<RwLock<MempoolSnapshot>>,
+    ) -> anyhow::Result<Self> {
         let rpc = RpcClient::new(
             config.rpc_url.clone(),
             config.rpc_user.clone(),
             config.rpc_pass.clone(),
-        );
-        Self {
+            config.rpc_timeout_ms,
+            config.rpc_retries,
+            config.rpc_retry_backoff_ms,
+        )?;
+        Ok(Self {
             config,
             db,
             rpc,
             snapshot,
-        }
+        })
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
         info!("starting mempool worker");
+        let mut state = MempoolState::default();
         loop {
-            if let Err(err) = self.refresh_once().await {
+            if let Err(err) = self.refresh_once(&mut state).await {
                 warn!(error = ?err, "mempool refresh failed; retrying");
             }
             sleep(Duration::from_millis(self.config.mempool_poll_ms)).await;
         }
     }
 
-    async fn refresh_once(&self) -> anyhow::Result<()> {
+    async fn refresh_once(&self, state: &mut MempoolState) -> anyhow::Result<()> {
         let mut txids: Vec<String> = self.rpc.call("getrawmempool", json!([false])).await?;
         let total_mempool_txs = txids.len() as u32;
         if txids.len() > self.config.mempool_max_txs {
             txids.truncate(self.config.mempool_max_txs);
         }
 
-        let mut parsed_txs = Vec::with_capacity(txids.len());
+        let current: HashSet<&str> = txids.iter().map(String::as_str).collect();
+        state
+            .parsed_txs
+            .retain(|txid, _| current.contains(txid.as_str()));
+
+        let missing_txids: Vec<String> = txids
+            .iter()
+            .filter(|txid| !state.parsed_txs.contains_key(*txid))
+            .cloned()
+            .collect();
+        if !missing_txids.is_empty() {
+            let batch_size = self.config.rpc_batch_size.max(1);
+            for chunk in missing_txids.chunks(batch_size) {
+                let params_list: Vec<serde_json::Value> =
+                    chunk.iter().map(|txid| json!([txid, true])).collect();
+                let batch: Vec<serde_json::Value> = self
+                    .rpc
+                    .call_batch("getrawtransaction", params_list)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "getrawtransaction batch failed for {} mempool txs",
+                            chunk.len()
+                        )
+                    })?;
+                for (txid, tx) in chunk.iter().zip(batch.into_iter()) {
+                    let parsed = parse_tx(&tx)
+                        .with_context(|| format!("failed parsing mempool tx {txid}"))?;
+                    state.parsed_txs.insert(txid.clone(), parsed);
+                }
+            }
+        }
+
         let mut mempool_outpoints: HashMap<String, OutpointTokenRef> = HashMap::new();
-        for txid in &txids {
-            let tx: serde_json::Value = self
-                .rpc
-                .call("getrawtransaction", json!([txid, true]))
-                .await
-                .with_context(|| format!("getrawtransaction failed for mempool tx {txid}"))?;
-            let parsed = parse_tx(&tx)?;
+        for parsed in state.parsed_txs.values() {
             for output in &parsed.outputs {
                 mempool_outpoints.insert(
                     output.outpoint.clone(),
@@ -119,17 +159,13 @@ impl MempoolWorker {
                     },
                 );
             }
-            parsed_txs.push(parsed);
         }
 
         let mut category_acc: HashMap<String, CategoryAcc> = HashMap::new();
-        let mut prevout_cache: HashMap<String, Option<OutpointTokenRef>> = HashMap::new();
 
-        for parsed in &parsed_txs {
+        for parsed in state.parsed_txs.values() {
             for output in &parsed.outputs {
-                let acc = category_acc
-                    .entry(output.category.clone())
-                    .or_default();
+                let acc = category_acc.entry(output.category.clone()).or_default();
                 if acc.touched_txs.insert(parsed.txid.clone()) {
                     acc.tx_count += 1;
                 }
@@ -142,7 +178,10 @@ impl MempoolWorker {
                     .holders
                     .entry(output.locking_bytecode.clone())
                     .or_default();
-                holder.locking_address = holder.locking_address.clone().or(output.locking_address.clone());
+                holder.locking_address = holder
+                    .locking_address
+                    .clone()
+                    .or(output.locking_address.clone());
                 holder.ft_delta += &output.ft_amount;
                 holder.utxo_delta += 1;
             }
@@ -151,11 +190,15 @@ impl MempoolWorker {
                 let outpoint_key = format!("{prev_txid}:{prev_vout}");
                 let outpoint = if let Some(value) = mempool_outpoints.get(&outpoint_key) {
                     Some(value.clone())
-                } else if let Some(value) = prevout_cache.get(&outpoint_key) {
+                } else if let Some(value) = state.prevout_cache.get(&outpoint_key) {
                     value.clone()
                 } else {
-                    let fetched = self.fetch_confirmed_token_outpoint(prev_txid, *prev_vout).await?;
-                    prevout_cache.insert(outpoint_key.clone(), fetched.clone());
+                    let fetched = self
+                        .fetch_confirmed_token_outpoint(prev_txid, *prev_vout)
+                        .await?;
+                    state
+                        .prevout_cache
+                        .insert(outpoint_key.clone(), fetched.clone());
                     fetched
                 };
 
@@ -163,9 +206,7 @@ impl MempoolWorker {
                     continue;
                 };
 
-                let acc = category_acc
-                    .entry(outpoint.category.clone())
-                    .or_default();
+                let acc = category_acc.entry(outpoint.category.clone()).or_default();
                 if acc.touched_txs.insert(parsed.txid.clone()) {
                     acc.tx_count += 1;
                 }
@@ -175,7 +216,10 @@ impl MempoolWorker {
                     .holders
                     .entry(outpoint.locking_bytecode.clone())
                     .or_default();
-                holder.locking_address = holder.locking_address.clone().or(outpoint.locking_address.clone());
+                holder.locking_address = holder
+                    .locking_address
+                    .clone()
+                    .or(outpoint.locking_address.clone());
                 holder.ft_delta -= &outpoint.ft_amount;
                 holder.utxo_delta -= 1;
             }
@@ -184,7 +228,7 @@ impl MempoolWorker {
         let mut snapshot = MempoolSnapshot {
             updated_at: Utc::now(),
             total_mempool_txs,
-            scanned_txs: parsed_txs.len() as u32,
+            scanned_txs: state.parsed_txs.len() as u32,
             categories: HashMap::new(),
         };
 
@@ -217,6 +261,9 @@ impl MempoolWorker {
         }
 
         *self.snapshot.write().await = snapshot;
+        if state.prevout_cache.len() > 200_000 {
+            state.prevout_cache.clear();
+        }
         Ok(())
     }
 
@@ -243,12 +290,14 @@ impl MempoolWorker {
         .fetch_optional(self.db.pool())
         .await?;
 
-        Ok(row.map(|(category, locking_bytecode, locking_address, ft_amount)| OutpointTokenRef {
-            category,
-            locking_bytecode,
-            locking_address,
-            ft_amount: parse_bigint(&ft_amount),
-        }))
+        Ok(row.map(
+            |(category, locking_bytecode, locking_address, ft_amount)| OutpointTokenRef {
+                category,
+                locking_bytecode,
+                locking_address,
+                ft_amount: parse_bigint(&ft_amount),
+            },
+        ))
     }
 }
 
@@ -333,4 +382,3 @@ fn parse_tx(tx: &serde_json::Value) -> anyhow::Result<ParsedTx> {
 fn parse_bigint(value: &str) -> BigInt {
     value.parse::<BigInt>().unwrap_or_else(|_| BigInt::zero())
 }
-

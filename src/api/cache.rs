@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -94,11 +94,20 @@ impl CachedResponse {
                 HeaderValue::from_static("110 - \"response is stale\""),
             );
         }
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
         headers
     }
 }
 
-pub fn compute_etag(cache_key: &str, updated_height: i32, dataset_version: &str, body: &Value) -> String {
+pub fn compute_etag(
+    cache_key: &str,
+    updated_height: i32,
+    dataset_version: &str,
+    body: &Value,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(cache_key.as_bytes());
     hasher.update(updated_height.to_be_bytes());
@@ -135,7 +144,7 @@ fn canonical_json(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CachedResponse, compute_etag};
+    use super::{compute_etag, CachedResponse};
     use axum::http::StatusCode;
     use serde_json::json;
 

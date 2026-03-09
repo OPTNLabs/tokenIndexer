@@ -13,16 +13,22 @@
 - Maintains `chain_state` and `applied_blocks` for restart + rollback
 
 2. **REST API** (multi-reader)
-- Axum JSON endpoints for token summary, top holders, paged holders, eligibility, holder tokens
+- Axum JSON endpoints for token summary, top holders, paged holders, eligibility, holder tokens, and BCMR category metadata
 - Small payloads, string balances, keyset pagination
 - Cache-first reads with ETag + `Cache-Control`
 
-3. **Storage**
+3. **BCMR Resolver Worker** (single writer task)
+- Collects BCMR OP_RETURN candidates from ingest/backfill
+- Resolves registry URLs (`https` and `ipfs://` via configured gateways)
+- Traverses token authchain to resolve authbase category
+- Stores registry snapshots + projected category metadata for fast API reads
+
+4. **Storage**
 - Postgres is source of truth
 - In-memory cache per instance (Moka)
 - Optional Redis for shared cache across replicas
 
-4. **Observability**
+5. **Observability**
 - `/health`
 - Structured logs (`tracing`)
 - Optional metrics endpoint (Prometheus) in production extension
@@ -40,7 +46,9 @@
 
 ## 2) DB Schema and Migrations
 
-Migration file: `migrations/0001_init.sql`
+Migration files:
+- `migrations/0001_init.sql` (core token schema)
+- `migrations/0004_bcmr.sql` (BCMR candidate/registry/metadata tables)
 
 ### Tables
 
@@ -65,6 +73,16 @@ Migration file: `migrations/0001_init.sql`
 5. `applied_blocks` (optional but recommended)
 - `height`, `hash`, `prev_hash`, `applied_at`
 - rollback anchor
+
+6. `bcmr_candidates`
+- queue of discovered BCMR OP_RETURN references
+- status machine: `pending -> processing -> resolved|retry|failed`
+
+7. `bcmr_registries`
+- fetched BCMR registry payload and validation checks per candidate
+
+8. `bcmr_category_metadata`
+- projected latest metadata by token category for low-latency API serving
 
 ### Required Indexes
 
@@ -204,11 +222,46 @@ Response:
 }
 ```
 
+### 6. `GET /v1/bcmr/:category`
+
+Response:
+```json
+{
+  "category": "<hex>",
+  "symbol": "TOKEN",
+  "name": "Token Name",
+  "description": "Metadata description",
+  "decimals": 8,
+  "uris": {
+    "icon": "ipfs://...",
+    "token": null
+  },
+  "latest_revision": "2026-03-01T14:04:00Z",
+  "identity_snapshot": {},
+  "nft_types": {},
+  "registry": {
+    "source_url": "https://.../.well-known/bitcoin-cash-metadata-registry.json",
+    "content_hash_hex": "<sha256 hex>",
+    "claimed_hash_hex": "<sha256 hex>",
+    "request_status": 200,
+    "validity_checks": {
+      "bcmr_file_accessible": true,
+      "bcmr_format_valid": true,
+      "bcmr_hash_match": true,
+      "identities_match": true
+    }
+  },
+  "updated_height": 850123,
+  "updated_at": "2026-03-01T14:04:00Z"
+}
+```
+
 ### Status Codes + Errors
 
 - `200` success
 - `400` invalid category/cursor/limit
 - `404` unknown token for summary
+- `404` no resolved BCMR metadata for `/v1/bcmr/:category`
 - `429` rate limited
 - `500` internal
 
@@ -256,6 +309,12 @@ Error shape:
 - stricter budgets for expensive routes (`holders` list)
 - edge proxy option: Traefik/Nginx rate-limit middleware
 
+6. **BCMR fetch safeguards**
+- outbound BCMR fetches only over `https`
+- redirects disabled for BCMR fetch client
+- DNS-resolved hosts blocked if they map to private/local IP ranges
+- payload bounded by `TOKENINDEX_BCMR_MAX_RESPONSE_BYTES`
+
 ### Capacity Shape
 
 - 2k clients: single API + Postgres + in-proc cache
@@ -279,6 +338,7 @@ See `Cargo.toml`: `tokio`, `axum`, `serde`, `sqlx`, `reqwest`, `tracing`, `moka`
 - `src/main.rs`: runtime bootstrap, run API + ingest tasks
 - `src/config.rs`: env-driven config
 - `src/ingest/`: BCHN RPC + block sync worker
+- `src/bcmr/`: BCMR OP_RETURN parser + resolver worker
 - `src/api/`: routes + caching/headers
 - `src/db/`: pool + query templates
 - `src/model.rs`: wire DTOs
@@ -344,6 +404,7 @@ Implemented query templates in `src/db/queries.rs` for:
 ```bash
 curl -sS http://127.0.0.1:8080/health
 curl -sS http://127.0.0.1:8080/v1/token/<category>/summary
+curl -sS http://127.0.0.1:8080/v1/bcmr/<category>
 curl -sS "http://127.0.0.1:8080/v1/token/<category>/holders/top?n=50"
 curl -sS "http://127.0.0.1:8080/v1/token/<category>/holders?limit=100"
 curl -sS http://127.0.0.1:8080/v1/token/<category>/holder/<lockingBytecode>

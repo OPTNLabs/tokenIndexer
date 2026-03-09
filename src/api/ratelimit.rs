@@ -42,13 +42,10 @@ impl IpRouteRateLimiter {
         let rate = rps as f64;
         let key = format!("{route_key}:{client_ip}");
 
-        let mut entry = self
-            .buckets
-            .entry(key)
-            .or_insert_with(|| Bucket {
-                tokens: burst,
-                last_refill: now,
-            });
+        let mut entry = self.buckets.entry(key).or_insert_with(|| Bucket {
+            tokens: burst,
+            last_refill: now,
+        });
 
         let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
         entry.tokens = (entry.tokens + elapsed * rate).min(burst);

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use sqlx::{migrate::Migrator, postgres::PgPoolOptions, PgPool};
@@ -13,9 +14,34 @@ pub struct Database {
 }
 
 impl Database {
-    pub async fn connect(database_url: &str, max_connections: u32) -> anyhow::Result<Self> {
+    pub async fn connect(
+        database_url: &str,
+        db_schema: &str,
+        max_connections: u32,
+        statement_timeout_ms: u64,
+    ) -> anyhow::Result<Self> {
+        let statement_timeout_ms = statement_timeout_ms as i64;
+        validate_schema_name(db_schema)?;
+        let schema = db_schema.to_ascii_lowercase();
         let pool = PgPoolOptions::new()
+            .min_connections(1)
             .max_connections(max_connections)
+            .acquire_timeout(Duration::from_secs(5))
+            .idle_timeout(Duration::from_secs(300))
+            .max_lifetime(Duration::from_secs(1_800))
+            .after_connect(move |conn, _meta| {
+                let statement_timeout_ms = statement_timeout_ms;
+                let schema = schema.clone();
+                Box::pin(async move {
+                    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS {schema}");
+                    sqlx::query(&create_schema).execute(&mut *conn).await?;
+                    let set_search_path = format!("SET search_path TO {schema}, public");
+                    sqlx::query(&set_search_path).execute(&mut *conn).await?;
+                    let set_timeout = format!("SET statement_timeout = {}", statement_timeout_ms);
+                    sqlx::query(&set_timeout).execute(&mut *conn).await?;
+                    Ok(())
+                })
+            })
             .connect(database_url)
             .await
             .with_context(|| format!("failed opening postgres pool: {database_url}"))?;
@@ -26,10 +52,27 @@ impl Database {
     }
 
     pub async fn run_migrations(&self) -> anyhow::Result<()> {
-        MIGRATOR.run(self.pool.as_ref()).await.context("migrations failed")
+        MIGRATOR
+            .run(self.pool.as_ref())
+            .await
+            .context("migrations failed")
     }
 
     pub fn pool(&self) -> &PgPool {
         self.pool.as_ref()
     }
+}
+
+fn validate_schema_name(schema: &str) -> anyhow::Result<()> {
+    let mut chars = schema.chars();
+    let Some(first) = chars.next() else {
+        anyhow::bail!("database schema cannot be empty");
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        anyhow::bail!("invalid database schema '{schema}'");
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        anyhow::bail!("invalid database schema '{schema}'");
+    }
+    Ok(())
 }
