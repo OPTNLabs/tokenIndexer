@@ -3,7 +3,7 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8080}"
 CATEGORY="${CATEGORY:?set CATEGORY=<token_category_hex>}"
-LOCKING="${LOCKING:?set LOCKING=<locking_bytecode_hex>}"
+ADDRESS="${ADDRESS:?set ADDRESS=<cashaddr_or_other_indexed_address>}"
 
 echo "health"
 curl -fsS "$BASE_URL/health" | jq .
@@ -15,7 +15,7 @@ echo "top holders"
 curl -fsS "$BASE_URL/v1/token/$CATEGORY/holders/top?n=5" | jq .
 
 echo "eligibility"
-curl -fsS "$BASE_URL/v1/token/$CATEGORY/holder/$LOCKING" | jq .
+curl -fsS "$BASE_URL/v1/token/$CATEGORY/holder/$ADDRESS" | jq .
 
 echo "holder tokens"
-curl -fsS "$BASE_URL/v1/holder/$LOCKING/tokens" | jq .
+curl -fsS "$BASE_URL/v1/address/$ADDRESS/tokens" | jq .

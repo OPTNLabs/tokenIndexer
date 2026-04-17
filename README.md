@@ -49,8 +49,8 @@ curl -sS http://127.0.0.1:8080/metrics
 - `GET /v1/bcmr/:category`
 - `GET /v1/token/:category/holders/top?n=50`
 - `GET /v1/token/:category/holders?limit=100&cursor=...`
-- `GET /v1/token/:category/holder/:lockingBytecode`
-- `GET /v1/holder/:lockingBytecode/tokens`
+- `GET /v1/token/:category/holder/:address`
+- `GET /v1/address/:address/tokens`
 - `GET /v1/token/:category/mempool?n=20`
 - `GET /v1/token/:category/insights`
 
@@ -63,6 +63,11 @@ All core holder/token endpoints now return unified values in a single response:
 ## Production Notes
 
 - Set `TOKENINDEX_CHIPNET_EXPECTED_CHAIN` (e.g. `chip`) to prevent indexing the wrong network.
+- For faster initial catch-up, disable optional workers until near tip:
+  - `TOKENINDEX_BCMR_ENABLED=false`
+  - `TOKENINDEX_BCMR_BACKFILL_ENABLED=false`
+  - `TOKENINDEX_MEMPOOL_ENABLED=false`
+  - `TOKENINDEX_RECONCILE_ENABLED=false`
 - Simultaneous chipnet + mainnet in one process:
   - Primary chipnet stack uses `TOKENINDEX_CHIPNET_*` vars (legacy `TOKENINDEX_*` names still work).
   - Secondary mainnet stack is enabled when `TOKENINDEX_MAINNET_RPC_URL` is set.
@@ -84,6 +89,11 @@ All core holder/token endpoints now return unified values in a single response:
   - `TOKENINDEX_STALE_WHILE_ERROR_SECS`
 - Set `TOKENINDEX_REDIS_URL` to enable shared cache in multi-replica deployments.
 - Set `TOKENINDEX_DATABASE_READ_URL` to route API reads to a PostgreSQL replica while ingest stays on primary.
+- Set `TOKENINDEX_APPLY_POSTGRES_TUNING=true` if you want the container to apply [scripts/ops/postgres_tuning.sql](scripts/ops/postgres_tuning.sql) at startup.
+- Ingest throughput knobs:
+  - `TOKENINDEX_RPC_BATCH_SIZE`
+  - `TOKENINDEX_RPC_PREFETCH_BATCHES`
+  - `TOKENINDEX_DB_INGEST_SYNCHRONOUS_COMMIT` (`off` is faster but reduces durability)
 - Tune DB query upper bound with `TOKENINDEX_DB_STATEMENT_TIMEOUT_MS`.
 - Per-IP route budgets:
   - `TOKENINDEX_RATE_LIMIT_DEFAULT_RPS`
@@ -148,7 +158,7 @@ All core holder/token endpoints now return unified values in a single response:
 - Recommended tokenExplorer queries:
   - `GET /v1/token/:category/summary`
   - `GET /v1/token/:category/holders/top?n=50`
-  - `GET /v1/holder/:lockingBytecode/tokens`
+  - `GET /v1/address/:address/tokens`
   - `GET /v1/bcmr/:category`
 - BCMR response includes validation and resolved metadata fields used by tokenExplorer:
   - `registry.validity_checks.*`

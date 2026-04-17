@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tower_http::cors::{Any, CorsLayer};
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::api::cache::{CachedResponse, RedisCacheRecord};
 use crate::api::{AppState, IpCidr};
@@ -57,6 +57,8 @@ pub struct KnownTokensQuery {
 struct ChainHealthDetails {
     chain: String,
     rpc_url: String,
+    bcmr_enabled: bool,
+    bcmr_backfill_enabled: bool,
     db_ok: bool,
     chain_state_present: bool,
     indexed_height: Option<i64>,
@@ -93,8 +95,26 @@ struct BcmrCategoryRow {
     validity_checks: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct TokenBcmrMetadata {
+    symbol: Option<String>,
+    name: Option<String>,
+    description: Option<String>,
+    decimals: Option<i32>,
+    icon_uri: Option<String>,
+    token_uri: Option<String>,
+    latest_revision: Option<chrono::DateTime<chrono::Utc>>,
+    identity_snapshot: Option<serde_json::Value>,
+    nft_types: Option<serde_json::Value>,
+    source_url: Option<String>,
+    content_hash_hex: Option<String>,
+    claimed_hash_hex: Option<String>,
+    request_status: Option<i32>,
+    validity_checks: Option<serde_json::Value>,
+}
+
 #[derive(Debug, sqlx::FromRow, Clone)]
-struct KnownTokenRow {
+struct TokenSummaryRow {
     category: String,
     total_supply: String,
     holder_count: i32,
@@ -103,6 +123,149 @@ struct KnownTokenRow {
     updated_at: chrono::DateTime<chrono::Utc>,
     symbol: Option<String>,
     name: Option<String>,
+    description: Option<String>,
+    decimals: Option<i32>,
+    icon_uri: Option<String>,
+    token_uri: Option<String>,
+    latest_revision: Option<chrono::DateTime<chrono::Utc>>,
+    identity_snapshot: Option<serde_json::Value>,
+    nft_types: Option<serde_json::Value>,
+    source_url: Option<String>,
+    content_hash_hex: Option<String>,
+    claimed_hash_hex: Option<String>,
+    request_status: Option<i32>,
+    validity_checks: Option<serde_json::Value>,
+}
+
+#[derive(Debug, sqlx::FromRow, Clone)]
+struct KnownTokenRow {
+    category: String,
+    total_supply: String,
+    holder_count: i32,
+    utxo_count: i32,
+    updated_height: i32,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    description: Option<String>,
+    decimals: Option<i32>,
+    icon_uri: Option<String>,
+    token_uri: Option<String>,
+    latest_revision: Option<chrono::DateTime<chrono::Utc>>,
+    identity_snapshot: Option<serde_json::Value>,
+    nft_types: Option<serde_json::Value>,
+    source_url: Option<String>,
+    content_hash_hex: Option<String>,
+    claimed_hash_hex: Option<String>,
+    request_status: Option<i32>,
+    validity_checks: Option<serde_json::Value>,
+    symbol: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow, Clone)]
+struct HolderTokenRow {
+    category: String,
+    locking_address: Option<String>,
+    ft_balance: String,
+    utxo_count: i32,
+    updated_height: i32,
+    symbol: Option<String>,
+    name: Option<String>,
+    description: Option<String>,
+    decimals: Option<i32>,
+    icon_uri: Option<String>,
+    token_uri: Option<String>,
+    latest_revision: Option<chrono::DateTime<chrono::Utc>>,
+    identity_snapshot: Option<serde_json::Value>,
+    nft_types: Option<serde_json::Value>,
+    source_url: Option<String>,
+    content_hash_hex: Option<String>,
+    claimed_hash_hex: Option<String>,
+    request_status: Option<i32>,
+    validity_checks: Option<serde_json::Value>,
+}
+
+impl From<&BcmrCategoryRow> for TokenBcmrMetadata {
+    fn from(value: &BcmrCategoryRow) -> Self {
+        Self {
+            symbol: value.symbol.clone(),
+            name: value.name.clone(),
+            description: value.description.clone(),
+            decimals: value.decimals,
+            icon_uri: value.icon_uri.clone(),
+            token_uri: value.token_uri.clone(),
+            latest_revision: value.latest_revision,
+            identity_snapshot: value.identity_snapshot.clone(),
+            nft_types: value.nft_types.clone(),
+            source_url: Some(value.source_url.clone()),
+            content_hash_hex: value.content_hash_hex.clone(),
+            claimed_hash_hex: value.claimed_hash_hex.clone(),
+            request_status: value.request_status,
+            validity_checks: value.validity_checks.clone(),
+        }
+    }
+}
+
+impl From<&TokenSummaryRow> for TokenBcmrMetadata {
+    fn from(value: &TokenSummaryRow) -> Self {
+        Self {
+            symbol: value.symbol.clone(),
+            name: value.name.clone(),
+            description: value.description.clone(),
+            decimals: value.decimals,
+            icon_uri: value.icon_uri.clone(),
+            token_uri: value.token_uri.clone(),
+            latest_revision: value.latest_revision,
+            identity_snapshot: value.identity_snapshot.clone(),
+            nft_types: value.nft_types.clone(),
+            source_url: value.source_url.clone(),
+            content_hash_hex: value.content_hash_hex.clone(),
+            claimed_hash_hex: value.claimed_hash_hex.clone(),
+            request_status: value.request_status,
+            validity_checks: value.validity_checks.clone(),
+        }
+    }
+}
+
+impl From<&KnownTokenRow> for TokenBcmrMetadata {
+    fn from(value: &KnownTokenRow) -> Self {
+        Self {
+            symbol: value.symbol.clone(),
+            name: value.name.clone(),
+            description: value.description.clone(),
+            decimals: value.decimals,
+            icon_uri: value.icon_uri.clone(),
+            token_uri: value.token_uri.clone(),
+            latest_revision: value.latest_revision,
+            identity_snapshot: value.identity_snapshot.clone(),
+            nft_types: value.nft_types.clone(),
+            source_url: value.source_url.clone(),
+            content_hash_hex: value.content_hash_hex.clone(),
+            claimed_hash_hex: value.claimed_hash_hex.clone(),
+            request_status: value.request_status,
+            validity_checks: value.validity_checks.clone(),
+        }
+    }
+}
+
+impl From<&HolderTokenRow> for TokenBcmrMetadata {
+    fn from(value: &HolderTokenRow) -> Self {
+        Self {
+            symbol: value.symbol.clone(),
+            name: value.name.clone(),
+            description: value.description.clone(),
+            decimals: value.decimals,
+            icon_uri: value.icon_uri.clone(),
+            token_uri: value.token_uri.clone(),
+            latest_revision: value.latest_revision,
+            identity_snapshot: value.identity_snapshot.clone(),
+            nft_types: value.nft_types.clone(),
+            source_url: value.source_url.clone(),
+            content_hash_hex: value.content_hash_hex.clone(),
+            claimed_hash_hex: value.claimed_hash_hex.clone(),
+            request_status: value.request_status,
+            validity_checks: value.validity_checks.clone(),
+        }
+    }
 }
 
 enum CacheRead {
@@ -295,7 +458,9 @@ pub async fn health_details(State(state): State<Arc<AppState>>) -> impl IntoResp
         && (!primary.chain_state_present || primary.lag_blocks.unwrap_or(0) >= 0)
         && secondary
             .as_ref()
-            .map(|s| s.db_ok && s.rpc_ok && (!s.chain_state_present || s.lag_blocks.unwrap_or(0) >= 0))
+            .map(|s| {
+                s.db_ok && s.rpc_ok && (!s.chain_state_present || s.lag_blocks.unwrap_or(0) >= 0)
+            })
             .unwrap_or(true);
 
     let status = if all_ok { "ok" } else { "degraded" };
@@ -339,6 +504,8 @@ async fn inspect_chain_health(db: &Database, cfg: &crate::config::Config) -> Cha
     ChainHealthDetails {
         chain: cfg.expected_chain.clone(),
         rpc_url: cfg.rpc_url.clone(),
+        bcmr_enabled: cfg.bcmr_enabled,
+        bcmr_backfill_enabled: cfg.bcmr_backfill_enabled,
         db_ok,
         chain_state_present: indexed_height.is_some(),
         indexed_height,
@@ -425,34 +592,26 @@ pub async fn token_summary(
         }
         CacheRead::Stale(stale) => {
             state.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
-            let row = sqlx::query_as::<
-                _,
-                (String, String, i32, i32, i32, chrono::DateTime<chrono::Utc>),
-            >(queries::TOKEN_SUMMARY)
-            .bind(category.clone())
-            .fetch_optional(active_db.pool())
-            .await;
+            let row = sqlx::query_as::<_, TokenSummaryRow>(queries::TOKEN_SUMMARY)
+                .bind(category.clone())
+                .fetch_optional(active_db.pool())
+                .await;
 
             return match row {
-                Ok(Some((
-                    category,
-                    total_supply,
-                    holder_count,
-                    utxo_count,
-                    updated_height,
-                    updated_at,
-                ))) => {
+                Ok(Some(row)) => {
+                    let bcmr = TokenBcmrMetadata::from(&row);
                     let body = build_unified_summary_body(
-                        &category,
-                        &total_supply,
-                        holder_count,
-                        utxo_count,
-                        updated_height,
-                        updated_at,
+                        &row.category,
+                        &row.total_supply,
+                        row.holder_count,
+                        row.utxo_count,
+                        row.updated_height,
+                        row.updated_at,
                         active_chain_name(&state, use_fallback),
                         mempool_view.as_ref(),
+                        &bcmr,
                     );
-                    cache_and_respond(&state, &cache_key, body, updated_height, 10, &headers)
+                    cache_and_respond(&state, &cache_key, body, row.updated_height, 10, &headers)
                 }
                 Ok(None) => error_json(
                     StatusCode::NOT_FOUND,
@@ -476,41 +635,40 @@ pub async fn token_summary(
         }
     }
 
-    let row = sqlx::query_as::<_, (String, String, i32, i32, i32, chrono::DateTime<chrono::Utc>)>(
-        queries::TOKEN_SUMMARY,
-    )
-    .bind(category.clone())
-    .fetch_optional(active_db.pool())
-    .await;
+    let row = sqlx::query_as::<_, TokenSummaryRow>(queries::TOKEN_SUMMARY)
+        .bind(category.clone())
+        .fetch_optional(active_db.pool())
+        .await;
 
     match row {
-        Ok(Some((
-            category,
-            total_supply,
-            holder_count,
-            utxo_count,
-            updated_height,
-            updated_at,
-        ))) => {
+        Ok(Some(row)) => {
+            let bcmr = TokenBcmrMetadata::from(&row);
             let body = build_unified_summary_body(
-                &category,
-                &total_supply,
-                holder_count,
-                utxo_count,
-                updated_height,
-                updated_at,
+                &row.category,
+                &row.total_supply,
+                row.holder_count,
+                row.utxo_count,
+                row.updated_height,
+                row.updated_at,
                 active_chain_name(&state, use_fallback),
                 mempool_view.as_ref(),
+                &bcmr,
             );
-            cache_and_respond(&state, &cache_key, body, updated_height, 10, &headers)
+            cache_and_respond(&state, &cache_key, body, row.updated_height, 10, &headers)
         }
         Ok(None) => error_json(
             StatusCode::NOT_FOUND,
             "token_not_found",
             "Category not indexed",
         ),
-        Err(_) => {
+        Err(err) => {
             state.metrics.db_errors.fetch_add(1, Ordering::Relaxed);
+            error!(
+                category = %category,
+                use_fallback,
+                error = ?err,
+                "token summary query failed"
+            );
             error_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
@@ -582,11 +740,13 @@ pub async fn known_tokens(
     let mut tokens: Vec<_> = merged
         .into_values()
         .map(|(row, chain)| {
+            let bcmr = TokenBcmrMetadata::from(&row);
             json!({
                 "category": row.category,
                 "chain": chain,
                 "name": row.name,
                 "symbol": row.symbol,
+                "bcmr": bcmr_metadata_json(&bcmr),
                 "total_supply": row.total_supply,
                 "holder_count": row.holder_count,
                 "utxo_count": row.utxo_count,
@@ -642,49 +802,32 @@ pub async fn bcmr_category(
 
     match row {
         Ok(Some(row)) => {
-            let BcmrCategoryRow {
-                category,
-                symbol,
-                name,
-                description,
-                decimals,
-                icon_uri,
-                token_uri,
-                latest_revision,
-                identity_snapshot,
-                nft_types,
-                updated_height,
-                updated_at,
-                source_url,
-                content_hash_hex,
-                claimed_hash_hex,
-                request_status,
-                validity_checks,
-            } = row;
+            let bcmr = TokenBcmrMetadata::from(&row);
             let body = json!({
-                "category": category,
-                "symbol": symbol,
-                "name": name,
-                "description": description,
-                "decimals": decimals,
+                "category": row.category,
+                "symbol": row.symbol,
+                "name": row.name,
+                "description": row.description,
+                "decimals": row.decimals,
                 "uris": {
-                    "icon": icon_uri,
-                    "token": token_uri,
+                    "icon": row.icon_uri,
+                    "token": row.token_uri,
                 },
-                "latest_revision": latest_revision,
-                "identity_snapshot": identity_snapshot,
-                "nft_types": nft_types,
+                "latest_revision": row.latest_revision,
+                "identity_snapshot": row.identity_snapshot,
+                "nft_types": row.nft_types,
                 "registry": {
-                    "source_url": source_url,
-                    "content_hash_hex": content_hash_hex,
-                    "claimed_hash_hex": claimed_hash_hex,
-                    "request_status": request_status,
-                    "validity_checks": validity_checks
+                    "source_url": row.source_url,
+                    "content_hash_hex": row.content_hash_hex,
+                    "claimed_hash_hex": row.claimed_hash_hex,
+                    "request_status": row.request_status,
+                    "validity_checks": row.validity_checks
                 },
-                "updated_height": updated_height,
-                "updated_at": updated_at,
+                "bcmr": bcmr_metadata_json(&bcmr),
+                "updated_height": row.updated_height,
+                "updated_at": row.updated_at,
             });
-            cache_and_respond(&state, &cache_key, body, updated_height, 10, &headers)
+            cache_and_respond(&state, &cache_key, body, row.updated_height, 10, &headers)
         }
         Ok(None) => error_json(
             StatusCode::NOT_FOUND,
@@ -978,7 +1121,7 @@ pub async fn paged_holders(
 pub async fn holder_eligibility(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((category, locking_bytecode)): Path<(String, String)>,
+    Path((category, address)): Path<(String, String)>,
 ) -> Response {
     state.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
     if !is_valid_hex_bytes(&category, 32, 32) {
@@ -988,11 +1131,11 @@ pub async fn holder_eligibility(
             "Category must be 32-byte hex",
         );
     }
-    if !is_valid_hex_bytes(&locking_bytecode, 1, 1024) {
+    if !is_valid_holder_address(&address) {
         return error_json(
             StatusCode::BAD_REQUEST,
-            "invalid_locking_bytecode",
-            "Locking bytecode must be hex",
+            "invalid_address",
+            "Address must be a non-empty string",
         );
     }
     let use_fallback = use_fallback_for_category(&state, &category).await;
@@ -1003,18 +1146,24 @@ pub async fn holder_eligibility(
         let delta = snapshot
             .categories
             .get(&category)
-            .and_then(|v| v.holders.get(&locking_bytecode));
+            .map(|view| mempool_delta_for_address(view, &address))
+            .filter(|delta| {
+                parse_bigint_str(&delta.ft_delta) != num_bigint::BigInt::from(0u8)
+                    || delta.utxo_delta != 0
+                    || delta.locking_address.is_some()
+            });
         (
             snapshot.updated_at.timestamp(),
             delta
+                .as_ref()
                 .map(|v| v.ft_delta.clone())
                 .unwrap_or_else(|| "0".to_string()),
-            delta.map(|v| v.utxo_delta).unwrap_or(0),
-            delta.and_then(|v| v.locking_address.clone()),
+            delta.as_ref().map(|v| v.utxo_delta).unwrap_or(0),
+            delta.and_then(|v| v.locking_address),
         )
     };
     let cache_key = format!(
-        "v1:{}:eligibility:{category}:{locking_bytecode}:m{mempool_version}",
+        "v1:{}:eligibility:{category}:{address}:m{mempool_version}",
         state.config.expected_chain
     );
     let mut _fill_guard: Option<OwnedMutexGuard<()>> = None;
@@ -1028,7 +1177,7 @@ pub async fn holder_eligibility(
             state.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
             let row = sqlx::query_as::<_, (Option<String>, String, i32, i32)>(queries::ELIGIBILITY)
                 .bind(&category)
-                .bind(&locking_bytecode)
+                .bind(&address)
                 .fetch_optional(active_db.pool())
                 .await;
 
@@ -1044,6 +1193,7 @@ pub async fn holder_eligibility(
                             "eligible": effective_ft > num_bigint::BigInt::from(0u8),
                             "confirmed_eligible": ft_balance != "0",
                             "effective_eligible": effective_ft > num_bigint::BigInt::from(0u8),
+                            "address": locking_address.clone().or(unconfirmed_address.clone()),
                             "locking_address": locking_address.or(unconfirmed_address.clone()),
                             "ft_balance": effective_ft.to_string(),
                             "utxo_count": effective_utxo,
@@ -1067,6 +1217,7 @@ pub async fn holder_eligibility(
                         "eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8),
                         "confirmed_eligible": false,
                         "effective_eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8),
+                        "address": unconfirmed_address.clone(),
                         "locking_address": unconfirmed_address.clone(),
                         "ft_balance": unconfirmed_ft_delta.clone(),
                         "utxo_count": unconfirmed_utxo_delta.max(0),
@@ -1101,7 +1252,7 @@ pub async fn holder_eligibility(
 
     let row = sqlx::query_as::<_, (Option<String>, String, i32, i32)>(queries::ELIGIBILITY)
         .bind(&category)
-        .bind(&locking_bytecode)
+        .bind(&address)
         .fetch_optional(active_db.pool())
         .await;
 
@@ -1117,6 +1268,7 @@ pub async fn holder_eligibility(
                     "eligible": effective_ft > num_bigint::BigInt::from(0u8),
                     "confirmed_eligible": ft_balance != "0",
                     "effective_eligible": effective_ft > num_bigint::BigInt::from(0u8),
+                    "address": locking_address.clone().or(unconfirmed_address.clone()),
                     "locking_address": locking_address.or(unconfirmed_address),
                     "ft_balance": effective_ft.to_string(),
                     "utxo_count": effective_utxo,
@@ -1140,6 +1292,7 @@ pub async fn holder_eligibility(
                 "eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8),
                 "confirmed_eligible": false,
                 "effective_eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8),
+                "address": unconfirmed_address.clone(),
                 "locking_address": unconfirmed_address,
                 "ft_balance": unconfirmed_ft_delta.clone(),
                 "utxo_count": unconfirmed_utxo_delta.max(0),
@@ -1169,15 +1322,15 @@ pub async fn holder_eligibility(
 pub async fn holder_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(locking_bytecode): Path<String>,
+    Path(address): Path<String>,
     Query(query): Query<HolderTokensQuery>,
 ) -> Response {
     state.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
-    if !is_valid_hex_bytes(&locking_bytecode, 1, 1024) {
+    if !is_valid_holder_address(&address) {
         return error_json(
             StatusCode::BAD_REQUEST,
-            "invalid_locking_bytecode",
-            "Locking bytecode must be hex",
+            "invalid_address",
+            "Address must be a non-empty string",
         );
     }
     let limit = query.limit.clamp(1, 500);
@@ -1186,7 +1339,7 @@ pub async fn holder_tokens(
         snapshot.updated_at.timestamp()
     };
     let cache_key = format!(
-        "v1:{}:holder-tokens:{locking_bytecode}:{limit}:m{mempool_version}",
+        "v1:{}:holder-tokens:{address}:{limit}:m{mempool_version}",
         state.config.expected_chain
     );
     let mut _fill_guard: Option<OwnedMutexGuard<()>> = None;
@@ -1198,37 +1351,33 @@ pub async fn holder_tokens(
         }
         CacheRead::Stale(stale) => {
             state.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
-            let primary_rows = sqlx::query_as::<_, (String, Option<String>, String, i32, i32)>(
-                queries::HOLDER_TOKENS,
-            )
-            .bind(&locking_bytecode)
-            .bind(limit)
-            .fetch_all(state.db.pool())
-            .await;
+            let primary_rows = sqlx::query_as::<_, HolderTokenRow>(queries::HOLDER_TOKENS)
+                .bind(&address)
+                .bind(limit)
+                .fetch_all(state.db.pool())
+                .await;
 
             return match primary_rows {
                 Ok(mut rows) => {
                     if let Some(fallback_db) = state.fallback_db.as_ref() {
                         if let Ok(mut fallback_rows) =
-                            sqlx::query_as::<_, (String, Option<String>, String, i32, i32)>(
-                                queries::HOLDER_TOKENS,
-                            )
-                            .bind(&locking_bytecode)
-                            .bind(limit)
-                            .fetch_all(fallback_db.pool())
-                            .await
+                            sqlx::query_as::<_, HolderTokenRow>(queries::HOLDER_TOKENS)
+                                .bind(&address)
+                                .bind(limit)
+                                .fetch_all(fallback_db.pool())
+                                .await
                         {
                             rows.append(&mut fallback_rows);
                             rows.sort_by(|a, b| {
-                                parse_bigint_str(&b.2)
-                                    .cmp(&parse_bigint_str(&a.2))
-                                    .then_with(|| a.0.cmp(&b.0))
+                                parse_bigint_str(&b.ft_balance)
+                                    .cmp(&parse_bigint_str(&a.ft_balance))
+                                    .then_with(|| a.category.cmp(&b.category))
                             });
                             rows.truncate(limit as usize);
                         }
                     }
-                    let updated_height = rows.first().map(|r| r.4).unwrap_or(0);
-                    let tokens = overlay_holder_tokens(&state, &locking_bytecode, rows).await;
+                    let updated_height = rows.first().map(|r| r.updated_height).unwrap_or(0);
+                    let tokens = overlay_holder_tokens(&state, &address, rows).await;
 
                     cache_and_respond(
                         &state,
@@ -1256,36 +1405,33 @@ pub async fn holder_tokens(
         }
     }
 
-    let primary_rows =
-        sqlx::query_as::<_, (String, Option<String>, String, i32, i32)>(queries::HOLDER_TOKENS)
-            .bind(&locking_bytecode)
-            .bind(limit)
-            .fetch_all(state.db.pool())
-            .await;
+    let primary_rows = sqlx::query_as::<_, HolderTokenRow>(queries::HOLDER_TOKENS)
+        .bind(&address)
+        .bind(limit)
+        .fetch_all(state.db.pool())
+        .await;
 
     match primary_rows {
         Ok(mut rows) => {
             if let Some(fallback_db) = state.fallback_db.as_ref() {
-                if let Ok(mut fallback_rows) = sqlx::query_as::<
-                    _,
-                    (String, Option<String>, String, i32, i32),
-                >(queries::HOLDER_TOKENS)
-                .bind(&locking_bytecode)
-                .bind(limit)
-                .fetch_all(fallback_db.pool())
-                .await
+                if let Ok(mut fallback_rows) =
+                    sqlx::query_as::<_, HolderTokenRow>(queries::HOLDER_TOKENS)
+                        .bind(&address)
+                        .bind(limit)
+                        .fetch_all(fallback_db.pool())
+                        .await
                 {
                     rows.append(&mut fallback_rows);
                     rows.sort_by(|a, b| {
-                        parse_bigint_str(&b.2)
-                            .cmp(&parse_bigint_str(&a.2))
-                            .then_with(|| a.0.cmp(&b.0))
+                        parse_bigint_str(&b.ft_balance)
+                            .cmp(&parse_bigint_str(&a.ft_balance))
+                            .then_with(|| a.category.cmp(&b.category))
                     });
                     rows.truncate(limit as usize);
                 }
             }
-            let updated_height = rows.first().map(|r| r.4).unwrap_or(0);
-            let tokens = overlay_holder_tokens(&state, &locking_bytecode, rows).await;
+            let updated_height = rows.first().map(|r| r.updated_height).unwrap_or(0);
+            let tokens = overlay_holder_tokens(&state, &address, rows).await;
 
             cache_and_respond(
                 &state,
@@ -1413,37 +1559,34 @@ pub async fn token_insights(
         return cached_to_response(&cached, &headers, false);
     }
 
-    let summary_row = sqlx::query_as::<
-        _,
-        (String, String, i32, i32, i32, chrono::DateTime<chrono::Utc>),
-    >(queries::TOKEN_SUMMARY)
-    .bind(category.clone())
-    .fetch_optional(active_db.pool())
-    .await;
+    let summary_row = sqlx::query_as::<_, TokenSummaryRow>(queries::TOKEN_SUMMARY)
+        .bind(category.clone())
+        .fetch_optional(active_db.pool())
+        .await;
 
-    let (category_hex, total_supply, holder_count, utxo_count, updated_height, updated_at) =
-        match summary_row {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                return error_json(
-                    StatusCode::NOT_FOUND,
-                    "token_not_found",
-                    "Category not indexed",
-                );
+    let summary = match summary_row {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return error_json(
+                StatusCode::NOT_FOUND,
+                "token_not_found",
+                "Category not indexed",
+            );
+        }
+        Err(_) => {
+            state.metrics.db_errors.fetch_add(1, Ordering::Relaxed);
+            if let Some(stale) = stale_cached {
+                state.metrics.stale_served.fetch_add(1, Ordering::Relaxed);
+                return cached_to_response(&stale, &headers, true);
             }
-            Err(_) => {
-                state.metrics.db_errors.fetch_add(1, Ordering::Relaxed);
-                if let Some(stale) = stale_cached {
-                    state.metrics.stale_served.fetch_add(1, Ordering::Relaxed);
-                    return cached_to_response(&stale, &headers, true);
-                }
-                return error_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Failed reading token insights",
-                );
-            }
-        };
+            return error_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Failed reading token insights",
+            );
+        }
+    };
+    let bcmr = TokenBcmrMetadata::from(&summary);
 
     let top_1_sum: String = sqlx::query_scalar(queries::TOP_N_BALANCE_SUM)
         .bind(category.clone())
@@ -1502,7 +1645,7 @@ pub async fn token_insights(
         .await
         .unwrap_or_else(|_| "0".to_string());
 
-    let total = parse_bigint_str(&total_supply);
+    let total = parse_bigint_str(&summary.total_supply);
     let top1 = parse_bigint_str(&top_1_sum);
     let top10 = parse_bigint_str(&top_10_sum);
     let top100 = parse_bigint_str(&top_100_sum);
@@ -1553,14 +1696,15 @@ pub async fn token_insights(
         });
 
     let body = json!({
-        "category": category_hex,
+        "category": summary.category,
         "summary": {
-            "total_supply": total_supply,
-            "holder_count": holder_count,
-            "utxo_count": utxo_count,
-            "updated_height": updated_height,
-            "updated_at": updated_at,
+            "total_supply": summary.total_supply,
+            "holder_count": summary.holder_count,
+            "utxo_count": summary.utxo_count,
+            "updated_height": summary.updated_height,
+            "updated_at": summary.updated_at,
         },
+        "bcmr": bcmr_metadata_json(&bcmr),
         "distribution": {
             "top_1_balance": top_1_sum,
             "top_1_share_bps": top_1_share_bps,
@@ -1579,7 +1723,14 @@ pub async fn token_insights(
         "mempool_overlay": mempool_overlay,
     });
 
-    cache_and_respond(&state, &cache_key, body, updated_height, 10, &headers)
+    cache_and_respond(
+        &state,
+        &cache_key,
+        body,
+        summary.updated_height,
+        10,
+        &headers,
+    )
 }
 
 async fn overlay_holders_for_category(
@@ -1604,7 +1755,7 @@ async fn overlay_holders_for_category(
                 let effective_address = locking_address
                     .or_else(|| holder_delta.and_then(|v| v.locking_address.clone()));
                 json!({
-                    "locking_bytecode": locking_bytecode,
+                    "address": effective_address.clone(),
                     "locking_address": effective_address,
                     "ft_balance": effective_ft.to_string(),
                     "utxo_count": effective_utxo,
@@ -1623,38 +1774,45 @@ async fn overlay_holders_for_category(
 
 async fn overlay_holder_tokens(
     state: &Arc<AppState>,
-    locking_bytecode: &str,
-    rows: Vec<(String, Option<String>, String, i32, i32)>,
+    address: &str,
+    rows: Vec<HolderTokenRow>,
 ) -> Vec<serde_json::Value> {
     let snapshot = state.mempool_snapshot.read().await;
     let mut seen_categories = std::collections::HashSet::new();
     let mut tokens = Vec::with_capacity(rows.len().saturating_add(8));
 
-    for (category, locking_address, ft_balance, utxo_count, updated_height) in rows {
+    for row in rows {
+        let bcmr = TokenBcmrMetadata::from(&row);
+        let category = row.category.clone();
         seen_categories.insert(category.clone());
         let delta = snapshot
             .categories
             .get(&category)
-            .and_then(|view| view.holders.get(locking_bytecode));
+            .map(|view| mempool_delta_for_address(view, address));
         let u_ft = delta
+            .as_ref()
             .map(|v| v.ft_delta.clone())
             .unwrap_or_else(|| "0".to_string());
-        let u_utxo = delta.map(|v| v.utxo_delta).unwrap_or(0);
-        let u_addr = delta.and_then(|v| v.locking_address.clone());
-        let effective_ft = parse_bigint_str(&ft_balance) + parse_bigint_str(&u_ft);
-        let effective_utxo = (utxo_count + u_utxo).max(0);
+        let u_utxo = delta.as_ref().map(|v| v.utxo_delta).unwrap_or(0);
+        let u_addr = delta.and_then(|v| v.locking_address);
+        let effective_ft = parse_bigint_str(&row.ft_balance) + parse_bigint_str(&u_ft);
+        let effective_utxo = (row.utxo_count + u_utxo).max(0);
         tokens.push(json!({
             "category": category,
-            "locking_address": locking_address.or(u_addr),
+            "name": row.name,
+            "symbol": row.symbol,
+            "bcmr": bcmr_metadata_json(&bcmr),
+            "address": row.locking_address.clone().or(u_addr.clone()),
+            "locking_address": row.locking_address.or(u_addr),
             "ft_balance": effective_ft.to_string(),
             "utxo_count": effective_utxo,
-            "confirmed_ft_balance": ft_balance,
+            "confirmed_ft_balance": row.ft_balance,
             "unconfirmed_ft_delta": u_ft,
             "effective_ft_balance": effective_ft.to_string(),
-            "confirmed_utxo_count": utxo_count,
+            "confirmed_utxo_count": row.utxo_count,
             "unconfirmed_utxo_delta": u_utxo,
             "effective_utxo_count": effective_utxo,
-            "updated_height": updated_height,
+            "updated_height": row.updated_height,
         }));
     }
 
@@ -1662,13 +1820,21 @@ async fn overlay_holder_tokens(
         if seen_categories.contains(category) {
             continue;
         }
-        let Some(delta) = view.holders.get(locking_bytecode) else {
+        let delta = mempool_delta_for_address(view, address);
+        if parse_bigint_str(&delta.ft_delta) == num_bigint::BigInt::from(0u8)
+            && delta.utxo_delta == 0
+            && delta.locking_address.is_none()
+        {
             continue;
-        };
+        }
         let effective_ft = parse_bigint_str(&delta.ft_delta);
         let effective_utxo = delta.utxo_delta.max(0);
         tokens.push(json!({
             "category": category,
+            "name": serde_json::Value::Null,
+            "symbol": serde_json::Value::Null,
+            "bcmr": bcmr_metadata_json(&TokenBcmrMetadata::default()),
+            "address": delta.locking_address.clone(),
             "locking_address": delta.locking_address.clone(),
             "ft_balance": effective_ft.to_string(),
             "utxo_count": effective_utxo,
@@ -1683,6 +1849,36 @@ async fn overlay_holder_tokens(
     }
 
     tokens
+}
+
+#[derive(Debug, Clone, Default)]
+struct AddressMempoolDelta {
+    locking_address: Option<String>,
+    ft_delta: String,
+    utxo_delta: i32,
+}
+
+fn mempool_delta_for_address(view: &MempoolCategoryView, address: &str) -> AddressMempoolDelta {
+    let mut ft_total = num_bigint::BigInt::from(0u8);
+    let mut utxo_total = 0_i32;
+    let mut found_address: Option<String> = None;
+
+    for delta in view.holders.values() {
+        if delta.locking_address.as_deref() != Some(address) {
+            continue;
+        }
+        ft_total += parse_bigint_str(&delta.ft_delta);
+        utxo_total += delta.utxo_delta;
+        if found_address.is_none() {
+            found_address = delta.locking_address.clone();
+        }
+    }
+
+    AddressMempoolDelta {
+        locking_address: found_address,
+        ft_delta: ft_total.to_string(),
+        utxo_delta: utxo_total,
+    }
 }
 
 pub fn cors_layer(config: &crate::config::Config) -> anyhow::Result<CorsLayer> {
@@ -1938,6 +2134,7 @@ fn build_unified_summary_body(
     updated_at: chrono::DateTime<chrono::Utc>,
     chain: &str,
     mempool_view: Option<&MempoolCategoryView>,
+    bcmr: &TokenBcmrMetadata,
 ) -> serde_json::Value {
     let (u_credits, u_debits, u_net, u_utxo, u_txs, u_nfts) = mempool_view
         .map(|v| {
@@ -1958,6 +2155,9 @@ fn build_unified_summary_body(
     json!({
         "category": category,
         "chain": chain,
+        "name": bcmr.name,
+        "symbol": bcmr.symbol,
+        "bcmr": bcmr_metadata_json(bcmr),
         "total_supply": effective_supply,
         "holder_count": holder_count,
         "utxo_count": effective_utxos,
@@ -1981,6 +2181,40 @@ fn build_unified_summary_body(
             "holder_count": holder_count,
             "utxo_count": effective_utxos,
         }
+    })
+}
+
+fn bcmr_metadata_json(bcmr: &TokenBcmrMetadata) -> serde_json::Value {
+    let registry = if bcmr.source_url.is_none()
+        && bcmr.content_hash_hex.is_none()
+        && bcmr.claimed_hash_hex.is_none()
+        && bcmr.request_status.is_none()
+        && bcmr.validity_checks.is_none()
+    {
+        serde_json::Value::Null
+    } else {
+        json!({
+            "source_url": bcmr.source_url,
+            "content_hash_hex": bcmr.content_hash_hex,
+            "claimed_hash_hex": bcmr.claimed_hash_hex,
+            "request_status": bcmr.request_status,
+            "validity_checks": bcmr.validity_checks,
+        })
+    };
+
+    json!({
+        "symbol": bcmr.symbol,
+        "name": bcmr.name,
+        "description": bcmr.description,
+        "decimals": bcmr.decimals,
+        "uris": {
+            "icon": bcmr.icon_uri,
+            "token": bcmr.token_uri,
+        },
+        "latest_revision": bcmr.latest_revision,
+        "identity_snapshot": bcmr.identity_snapshot,
+        "nft_types": bcmr.nft_types,
+        "registry": registry,
     })
 }
 
@@ -2078,6 +2312,14 @@ fn is_valid_hex_bytes(value: &str, min_bytes: usize, max_bytes: usize) -> bool {
     }
     let byte_len = value.len() / 2;
     byte_len >= min_bytes && byte_len <= max_bytes
+}
+
+fn is_valid_holder_address(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
 }
 
 fn error_json(status: StatusCode, code: &'static str, message: &'static str) -> Response {

@@ -3,7 +3,7 @@ import { check, sleep } from 'k6';
 
 const BASE = __ENV.BASE_URL || 'http://127.0.0.1:8080';
 const CATEGORY = __ENV.CATEGORY || '';
-const LOCKING = __ENV.LOCKING || '';
+const ADDRESS = __ENV.ADDRESS || '';
 
 export const options = {
   scenarios: {
@@ -27,7 +27,7 @@ export const options = {
 };
 
 export default function () {
-  const url = `${BASE}/v1/token/${CATEGORY}/holder/${LOCKING}`;
+  const url = `${BASE}/v1/token/${CATEGORY}/holder/${ADDRESS}`;
   const res = http.get(url, { headers: { 'Accept-Encoding': 'gzip' } });
   check(res, {
     'status is 200': (r) => r.status === 200,

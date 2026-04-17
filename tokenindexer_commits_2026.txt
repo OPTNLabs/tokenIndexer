@@ -1,0 +1,5 @@
+2026-03-09 | 789d389 | fixing dockerfile
+2026-03-08 | a4d30ad | fixing dockerfile build issue
+2026-03-08 | 7eb644a | fixing dockerfile build issue
+2026-03-08 | 844250a | optmizing indexing process
+2026-03-02 | abcb413 | first commit

@@ -1,0 +1,186 @@
+{
+  "monitors": [
+    {
+      "name": "vps",
+      "type": "keyword",
+      "url": "https://whoami.optnlabs.com",
+      "keyword": "Hostname:",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "chaingraph - chipnet",
+      "type": "keyword",
+      "url": "https://chaingraph.optnlabs.com/v1/graphql",
+      "method": "POST",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"query\":\"query { __typename }\"}",
+      "keyword": "\"query_root\"",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "BCMR - chipnet",
+      "type": "keyword",
+      "url": "https://bcmr.optnlabs.com/api/status/latest-block/",
+      "keyword": "\"height\":",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "IPFS Gateway (public)",
+      "type": "keyword",
+      "url": "https://ipfs.optnlabs.com/ipfs/QmeHA57ny2H2mX29iWLzXdwfjfMHPAKtUVZrJ4Py7kKg5X",
+      "keyword": "bcmr-v2.schema.json",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "Electrum Connection",
+      "type": "port",
+      "hostname": "electrum-chipnet.optnlabs.com",
+      "port": 443,
+      "interval": 60,
+      "timeout": 48
+    },
+    {
+      "name": "Electrum WSS",
+      "type": "port",
+      "hostname": "electrum-chipnet.optnlabs.com",
+      "port": 50004,
+      "interval": 60,
+      "timeout": 48
+    },
+    {
+      "name": "HPSFF Proxmox",
+      "type": "port",
+      "hostname": "192.168.31.230",
+      "port": 8006,
+      "interval": 60,
+      "timeout": 48
+    },
+    {
+      "name": "Electrum WSS local",
+      "type": "port",
+      "hostname": "192.168.31.218",
+      "port": 50004,
+      "interval": 60,
+      "timeout": 48
+    },
+    {
+      "name": "Chaingraph Upstream",
+      "type": "port",
+      "hostname": "192.168.31.162",
+      "port": 32214,
+      "interval": 60,
+      "timeout": 48
+    },
+    {
+      "name": "IPFS Gateway (LAN)",
+      "type": "keyword",
+      "url": "http://192.168.31.108:8080/ipfs/QmeHA57ny2H2mX29iWLzXdwfjfMHPAKtUVZrJ4Py7kKg5X",
+      "keyword": "bcmr-v2.schema.json",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "IPFS API (public)",
+      "type": "keyword",
+      "url": "https://ipfs-api.optnlabs.com/api/v0/version",
+      "method": "POST",
+      "keyword": "Unauthorized",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-499"]
+    },
+    {
+      "name": "BCMR upstream",
+      "type": "keyword",
+      "url": "http://192.168.31.128:8000/api/status/latest-block/",
+      "keyword": "\"height\":",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "IPFS API (LAN)",
+      "type": "keyword",
+      "url": "http://192.168.31.108:5001/api/v0/version",
+      "method": "POST",
+      "keyword": "\"Version\":",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "tokenIndexer - public data",
+      "type": "keyword",
+      "url": "https://tokenindex.optnlabs.com/v1/tokens/known?limit=3",
+      "keyword": "\"tokens\":[",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "tokenIndexer - LAN health",
+      "type": "keyword",
+      "url": "http://192.168.31.123:8080/health",
+      "keyword": "\"db_ok\":true",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "priceFeed - public prices",
+      "type": "keyword",
+      "url": "https://price.optnlabs.com/v1/prices?bases=BCH,BTC&quote=USD",
+      "keyword": "\"BCH-USD\":",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "priceFeed - LAN health",
+      "type": "keyword",
+      "url": "http://192.168.31.218:8080/health",
+      "keyword": "\"status\":\"ok\"",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "upload relay - public healthz",
+      "type": "keyword",
+      "url": "https://upload.optnlabs.com/healthz",
+      "keyword": "ok",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "upload relay - LAN healthz",
+      "type": "keyword",
+      "url": "http://192.168.31.108:8787/healthz",
+      "keyword": "ok",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "kuma self",
+      "type": "keyword",
+      "url": "http://127.0.0.1:3001/",
+      "keyword": "Uptime Kuma",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    }
+  ]
+}

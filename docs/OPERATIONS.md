@@ -18,8 +18,24 @@
 - `GET /health` must return `status=ok`
 - `GET /metrics` must expose counters
 - `chain_state.height` should track BCHN tip with bounded lag
+- `tokenindex_ingest_last_lag_blocks` should trend toward zero after startup catch-up
 - `bcmr_candidates` should not accumulate in `processing`/`retry` unexpectedly
 - `bcmr_category_metadata` should populate for known BCMR token categories
+
+Useful ingest-specific `/metrics` series:
+
+- `tokenindex_ingest_blocks_applied_total`
+- `tokenindex_ingest_prefetch_batches_total`
+- `tokenindex_ingest_prefetch_blocks_total`
+- `tokenindex_ingest_spend_rows_total`
+- `tokenindex_ingest_credit_rows_total`
+- `tokenindex_ingest_holder_delta_rows_total`
+- `tokenindex_ingest_prefetch_ms_sum`
+- `tokenindex_ingest_apply_ms_sum`
+- `tokenindex_ingest_commit_ms_sum`
+- `tokenindex_ingest_last_indexed_height`
+- `tokenindex_ingest_last_known_tip_height`
+- `tokenindex_ingest_last_lag_blocks`
 
 ## Cache and Rate-Limit Knobs
 
@@ -30,6 +46,15 @@
 - `TOKENINDEX_RATE_LIMIT_DEFAULT_RPS`: per-IP default route budget
 - `TOKENINDEX_RATE_LIMIT_HOLDERS_RPS`: per-IP holders route budget
 - `TOKENINDEX_RATE_LIMIT_ELIGIBILITY_RPS`: per-IP eligibility route budget
+
+## Ingest Runtime Knobs
+
+- `TOKENINDEX_RPC_BATCH_SIZE`: block/hash fetch batch size
+- `TOKENINDEX_RPC_PREFETCH_BATCHES`: number of block batches fetched ahead of the writer
+- `TOKENINDEX_DB_INGEST_SYNCHRONOUS_COMMIT`: ingest durability mode (`off` is faster, less durable)
+- `TOKENINDEX_CONSISTENCY_CHECK_INTERVAL`: full drift check cadence
+- `TOKENINDEX_MEMPOOL_ENABLED`: disable during bootstrap if ingest lag matters more than mempool freshness
+- `TOKENINDEX_RECONCILE_ENABLED`: disable during bootstrap if you want all DB headroom on forward sync
 
 ## BCMR Runtime Knobs
 
@@ -85,11 +110,16 @@ ORDER BY updated_height DESC;
 TOKENINDEX_DATABASE_READ_URL=postgres://tokenindex:tokenindex@replica:5432/tokenindex
 ```
 3. Keep ingest on primary (`TOKENINDEX_DATABASE_URL` remains primary).
-4. Validate lag before enabling production traffic:
+4. If you need stricter separation, pin pools explicitly:
+```bash
+TOKENINDEX_DB_API_MAX_CONNECTIONS=<replica-pool-size>
+TOKENINDEX_DB_INGEST_MAX_CONNECTIONS=<primary-pool-size>
+```
+5. Validate lag before enabling production traffic:
 ```sql
 SELECT now() - pg_last_xact_replay_timestamp() AS replica_lag;
 ```
-5. Roll back instantly by unsetting `TOKENINDEX_DATABASE_READ_URL` and restarting API pods.
+6. Roll back instantly by unsetting `TOKENINDEX_DATABASE_READ_URL` and restarting API pods.
 
 ## Postgres Autovacuum and Analyze Tuning
 
@@ -129,6 +159,12 @@ Or apply the checked-in script:
 
 ```bash
 psql "$TOKENINDEX_DATABASE_URL" -f scripts/ops/postgres_tuning.sql
+```
+
+Or let the container apply the same script on startup:
+
+```bash
+TOKENINDEX_APPLY_POSTGRES_TUNING=true
 ```
 
 ## Partition Migration Strategy
@@ -178,7 +214,7 @@ Do not attempt direct in-place conversion during normal release windows.
 ### k6 eligibility hot path
 
 ```bash
-CATEGORY=<hex> LOCKING=<hex> BASE_URL=http://127.0.0.1:8080 k6 run scripts/load/k6-eligibility.js
+CATEGORY=<hex> ADDRESS=<address> BASE_URL=http://127.0.0.1:8080 k6 run scripts/load/k6-eligibility.js
 ```
 
 ### vegeta holders endpoints
@@ -215,6 +251,6 @@ Expected TokenIndex behavior:
 
 1. Confirm cache hit ratio remains high after rollout (`/metrics`).
 2. Confirm p95 latency regression-free for:
-`/v1/token/:category/summary`, `/holders/top`, `/holders`, `/holder/:lockingBytecode`, `/insights`.
+`/v1/token/:category/summary`, `/holders/top`, `/holders`, `/holder/:address`, `/insights`.
 3. Confirm ingest stays near tip while load test runs.
 4. Confirm replica lag remains within target if read replica is enabled.

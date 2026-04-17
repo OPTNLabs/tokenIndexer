@@ -71,6 +71,7 @@ struct HolderAcc {
 struct MempoolState {
     parsed_txs: HashMap<String, ParsedTx>,
     prevout_cache: HashMap<String, Option<OutpointTokenRef>>,
+    best_block_hash: Option<String>,
 }
 
 impl MempoolWorker {
@@ -107,6 +108,12 @@ impl MempoolWorker {
     }
 
     async fn refresh_once(&self, state: &mut MempoolState) -> anyhow::Result<()> {
+        let best_block_hash: String = self.rpc.call("getbestblockhash", json!([])).await?;
+        if state.best_block_hash.as_deref() != Some(best_block_hash.as_str()) {
+            state.prevout_cache.clear();
+            state.best_block_hash = Some(best_block_hash);
+        }
+
         let mut txids: Vec<String> = self.rpc.call("getrawmempool", json!([false])).await?;
         let total_mempool_txs = txids.len() as u32;
         if txids.len() > self.config.mempool_max_txs {

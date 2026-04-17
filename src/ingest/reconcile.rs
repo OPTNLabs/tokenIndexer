@@ -25,15 +25,19 @@ impl ReconciliationWorker {
             if let Err(err) = self.reconcile_once().await {
                 warn!(error = ?err, "reconciliation cycle failed; retrying");
             }
-            sleep(Duration::from_secs(self.config.reconcile_interval_secs.max(1))).await;
+            sleep(Duration::from_secs(
+                self.config.reconcile_interval_secs.max(1),
+            ))
+            .await;
         }
     }
 
     async fn reconcile_once(&self) -> anyhow::Result<()> {
-        let height: Option<i32> = sqlx::query_scalar("SELECT height FROM chain_state WHERE id = TRUE")
-            .fetch_optional(self.db.pool())
-            .await
-            .context("failed reading chain_state for reconciliation")?;
+        let height: Option<i32> =
+            sqlx::query_scalar("SELECT height FROM chain_state WHERE id = TRUE")
+                .fetch_optional(self.db.pool())
+                .await
+                .context("failed reading chain_state for reconciliation")?;
 
         let Some(height) = height else {
             return Ok(());
@@ -97,9 +101,7 @@ impl ReconciliationWorker {
         let mismatches_after = self.mismatch_count().await?;
         info!(
             height,
-            mismatches_before,
-            mismatches_after,
-            "completed reconciliation cycle"
+            mismatches_before, mismatches_after, "completed reconciliation cycle"
         );
         Ok(())
     }
@@ -115,12 +117,21 @@ impl ReconciliationWorker {
                 COALESCE(SUM(utxo_count), 0)::integer AS utxo_count
               FROM token_holders
               GROUP BY category
+            ),
+            categories AS (
+              SELECT category FROM token_stats
+              UNION
+              SELECT category FROM holder_rollup
             )
             SELECT COUNT(*)::bigint
-            FROM token_stats s
+            FROM categories c
+            LEFT JOIN token_stats s
+              ON s.category = c.category
             LEFT JOIN holder_rollup h
-              ON h.category = s.category
-            WHERE s.total_ft_supply <> COALESCE(h.total_ft_supply, 0)
+              ON h.category = c.category
+            WHERE s.category IS NULL
+               OR h.category IS NULL
+               OR s.total_ft_supply <> COALESCE(h.total_ft_supply, 0)
                OR s.holder_count <> COALESCE(h.holder_count, 0)
                OR s.utxo_count <> COALESCE(h.utxo_count, 0)
             "#,

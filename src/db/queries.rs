@@ -2,15 +2,33 @@
 
 pub const TOKEN_SUMMARY: &str = r#"
 SELECT
-  encode(category, 'hex') AS category,
-  total_ft_supply::text AS total_supply,
-  holder_count,
-  utxo_count,
-  updated_height,
-  updated_at
-FROM token_stats
-WHERE category = decode($1, 'hex')
-  AND (total_ft_supply > 0 OR holder_count > 0 OR utxo_count > 0)
+  encode(s.category, 'hex') AS category,
+  s.total_ft_supply::text AS total_supply,
+  s.holder_count,
+  s.utxo_count,
+  s.updated_height,
+  s.updated_at,
+  m.symbol AS symbol,
+  m.name AS name,
+  m.description AS description,
+  m.decimals AS decimals,
+  m.icon_uri AS icon_uri,
+  m.token_uri AS token_uri,
+  m.latest_revision AS latest_revision,
+  m.identity_snapshot AS identity_snapshot,
+  m.nft_types AS nft_types,
+  r.source_url AS source_url,
+  r.content_hash_hex AS content_hash_hex,
+  r.claimed_hash_hex AS claimed_hash_hex,
+  r.request_status AS request_status,
+  r.validity_checks AS validity_checks
+FROM token_stats s
+LEFT JOIN bcmr_category_metadata m
+  ON m.category = s.category
+LEFT JOIN bcmr_registries r
+  ON r.id = m.registry_id
+WHERE s.category = decode($1, 'hex')
+  AND (s.total_ft_supply > 0 OR s.holder_count > 0 OR s.utxo_count > 0)
 "#;
 
 pub const TOP_HOLDERS: &str = r#"
@@ -49,25 +67,61 @@ LIMIT $4
 pub const ELIGIBILITY: &str = r#"
 SELECT
   locking_address,
-  ft_balance::text AS ft_balance,
-  utxo_count,
-  updated_height
+  COALESCE(SUM(ft_balance), 0)::text AS ft_balance,
+  COALESCE(SUM(utxo_count), 0)::int AS utxo_count,
+  MAX(updated_height) AS updated_height
 FROM token_holders
 WHERE category = decode($1, 'hex')
-  AND locking_bytecode = decode($2, 'hex')
+  AND locking_address = $2
+GROUP BY locking_address
 "#;
 
 pub const HOLDER_TOKENS: &str = r#"
 SELECT
-  encode(category, 'hex') AS category,
-  locking_address,
-  ft_balance::text AS ft_balance,
-  utxo_count,
-  updated_height
-FROM token_holders
-WHERE locking_bytecode = decode($1, 'hex')
-  AND (ft_balance > 0 OR utxo_count > 0)
-ORDER BY ft_balance DESC, category ASC
+  encode(h.category, 'hex') AS category,
+  h.locking_address,
+  COALESCE(SUM(h.ft_balance), 0)::text AS ft_balance,
+  COALESCE(SUM(h.utxo_count), 0)::int AS utxo_count,
+  MAX(h.updated_height) AS updated_height,
+  m.symbol,
+  m.name,
+  m.description AS description,
+  m.decimals AS decimals,
+  m.icon_uri AS icon_uri,
+  m.token_uri AS token_uri,
+  m.latest_revision AS latest_revision,
+  m.identity_snapshot AS identity_snapshot,
+  m.nft_types AS nft_types,
+  r.source_url AS source_url,
+  r.content_hash_hex AS content_hash_hex,
+  r.claimed_hash_hex AS claimed_hash_hex,
+  r.request_status AS request_status,
+  r.validity_checks AS validity_checks
+FROM token_holders h
+LEFT JOIN bcmr_category_metadata m
+  ON m.category = h.category
+LEFT JOIN bcmr_registries r
+  ON r.id = m.registry_id
+WHERE h.locking_address = $1
+  AND (h.ft_balance > 0 OR h.utxo_count > 0)
+GROUP BY
+  h.category,
+  h.locking_address,
+  m.symbol AS symbol,
+  m.name AS name,
+  m.description,
+  m.decimals,
+  m.icon_uri,
+  m.token_uri,
+  m.latest_revision,
+  m.identity_snapshot,
+  m.nft_types,
+  r.source_url,
+  r.content_hash_hex,
+  r.claimed_hash_hex,
+  r.request_status,
+  r.validity_checks
+ORDER BY SUM(h.ft_balance) DESC, h.category ASC
 LIMIT $2
 "#;
 
@@ -186,11 +240,25 @@ SELECT
   s.utxo_count,
   s.updated_height,
   s.updated_at,
+  m.description,
+  m.decimals,
+  m.icon_uri,
+  m.token_uri,
+  m.latest_revision,
+  m.identity_snapshot,
+  m.nft_types,
+  r.source_url,
+  r.content_hash_hex,
+  r.claimed_hash_hex,
+  r.request_status,
+  r.validity_checks,
   m.symbol,
   m.name
 FROM token_stats s
 LEFT JOIN bcmr_category_metadata m
   ON m.category = s.category
+LEFT JOIN bcmr_registries r
+  ON r.id = m.registry_id
 WHERE s.total_ft_supply > 0
    OR s.holder_count > 0
    OR s.utxo_count > 0

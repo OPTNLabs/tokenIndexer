@@ -1,12 +1,15 @@
 use anyhow::{anyhow, Context};
 use num_bigint::BigInt;
 use num_traits::Zero;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
 
+use crate::api::ApiMetrics;
 use crate::bcmr::parse_bcmr_op_return;
 use crate::config::Config;
 use crate::db::Database;
@@ -18,6 +21,7 @@ pub struct IngestWorker {
     config: Config,
     db: Database,
     rpc: RpcClient,
+    metrics: Arc<ApiMetrics>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +35,12 @@ struct TokenOutput {
     nft_capability: Option<i16>,
     nft_commitment_hex: Option<String>,
     satoshis: i64,
+}
+
+#[derive(Debug, Clone)]
+struct SpendInput {
+    prev_txid_hex: String,
+    prev_vout: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -49,8 +59,14 @@ struct HolderDeltaAcc {
     utxo_delta: i32,
 }
 
+#[derive(Debug)]
+struct FetchedBlockBatch {
+    blocks: Vec<(i32, Value)>,
+    fetch_ms: u64,
+}
+
 impl IngestWorker {
-    pub fn new(config: Config, db: Database) -> anyhow::Result<Self> {
+    pub fn new(config: Config, db: Database, metrics: Arc<ApiMetrics>) -> anyhow::Result<Self> {
         let rpc = RpcClient::new(
             config.rpc_url.clone(),
             config.rpc_user.clone(),
@@ -59,7 +75,12 @@ impl IngestWorker {
             config.rpc_retries,
             config.rpc_retry_backoff_ms,
         )?;
-        Ok(Self { config, db, rpc })
+        Ok(Self {
+            config,
+            db,
+            rpc,
+            metrics,
+        })
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
@@ -76,51 +97,142 @@ impl IngestWorker {
 
     async fn sync_once(&self) -> anyhow::Result<()> {
         let chain_height: i64 = self.rpc.call("getblockcount", json!([])).await?;
+        let chain_height = chain_height as i32;
         let mut state_height = self.current_height().await?;
+        let node_recovering = state_height > chain_height;
         state_height = self
-            .reconcile_state_with_node(chain_height as i32, state_height)
+            .reconcile_state_with_node(chain_height, state_height)
             .await?;
 
         if state_height < self.config.bootstrap_height {
             state_height = self.config.bootstrap_height;
         }
+        self.metrics.observe_ingest_tip(state_height, chain_height);
 
-        if state_height >= chain_height as i32 {
+        if node_recovering {
+            sleep(Duration::from_millis(1_000)).await;
+            return Ok(());
+        }
+
+        if state_height >= chain_height {
             sleep(Duration::from_millis(600)).await;
             return Ok(());
         }
 
         let next_height = state_height + 1;
-        let block_hash: String = self
-            .rpc
-            .call("getblockhash", json!([next_height]))
-            .await
-            .context("getblockhash failed")?;
+        let batch_size = self.config.rpc_batch_size.max(1) as i32;
+        let prefetch_batches = self.config.rpc_prefetch_batches.max(1);
+        let (tx, mut rx) = mpsc::channel::<anyhow::Result<FetchedBlockBatch>>(prefetch_batches);
+        let rpc = self.rpc.clone();
 
-        let block: serde_json::Value = self
-            .rpc
-            .call("getblock", json!([block_hash, 2]))
-            .await
-            .context("getblock verbosity=2 failed")?;
+        let fetch_task = tokio::spawn(async move {
+            let mut batch_start = next_height;
+            while batch_start <= chain_height {
+                let batch_end = (batch_start + batch_size - 1).min(chain_height);
+                let started = Instant::now();
+                let blocks = IngestWorker::fetch_blocks_with_rpc(&rpc, batch_start, batch_end)
+                    .await
+                    .with_context(|| {
+                        format!("failed fetching block batch {batch_start}..={batch_end}")
+                    })?;
+                let fetch_ms = started.elapsed().as_millis() as u64;
+                if tx
+                    .send(Ok(FetchedBlockBatch { blocks, fetch_ms }))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                batch_start = batch_end + 1;
+            }
+            Ok::<(), anyhow::Error>(())
+        });
 
-        if self.is_parent_mismatch(next_height, &block).await? {
-            self.handle_reorg(next_height).await?;
-            return Ok(());
+        while let Some(batch_result) = rx.recv().await {
+            let batch = batch_result?;
+            let batch_first_height = batch.blocks.first().map(|(height, _)| *height).unwrap_or(0);
+            let batch_last_height = batch.blocks.last().map(|(height, _)| *height).unwrap_or(0);
+            self.metrics
+                .observe_ingest_prefetch(1, batch.blocks.len() as u64, batch.fetch_ms);
+            info!(
+                batch_first_height,
+                batch_last_height,
+                blocks = batch.blocks.len(),
+                fetch_ms = batch.fetch_ms,
+                "prefetched block batch"
+            );
+
+            for (height, block) in batch.blocks {
+                if self.is_parent_mismatch(height, &block).await? {
+                    self.handle_reorg(height).await?;
+                    fetch_task.abort();
+                    return Ok(());
+                }
+
+                let started = Instant::now();
+                let commit_ms = self.apply_block(height, &block).await?;
+                let apply_ms = started.elapsed().as_millis() as u64;
+                self.metrics.observe_ingest_apply(apply_ms);
+                self.metrics.observe_ingest_commit(commit_ms);
+                self.metrics.observe_ingest_tip(height, chain_height);
+                info!(
+                    height,
+                    elapsed_ms = apply_ms,
+                    commit_ms,
+                    lag_blocks = (chain_height - height).max(0),
+                    "applied block"
+                );
+                if self.config.consistency_check_interval > 0
+                    && height % self.config.consistency_check_interval == 0
+                {
+                    self.run_consistency_check(height).await?;
+                }
+            }
         }
 
-        let started = Instant::now();
-        self.apply_block(next_height, &block).await?;
-        info!(
-            height = next_height,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "applied block"
-        );
-        if self.config.consistency_check_interval > 0
-            && next_height % self.config.consistency_check_interval == 0
-        {
-            self.run_consistency_check(next_height).await?;
+        match fetch_task.await {
+            Ok(result) => result?,
+            Err(err) if err.is_cancelled() => {}
+            Err(err) => return Err(anyhow!("prefetch task join error: {err}")),
         }
         Ok(())
+    }
+
+    async fn fetch_blocks_with_rpc(
+        rpc: &RpcClient,
+        start_height: i32,
+        end_height: i32,
+    ) -> anyhow::Result<Vec<(i32, Value)>> {
+        if start_height > end_height {
+            return Ok(Vec::new());
+        }
+
+        let heights: Vec<i32> = (start_height..=end_height).collect();
+        let hash_params: Vec<Value> = heights.iter().map(|height| json!([height])).collect();
+        let hashes: Vec<String> = if heights.len() == 1 {
+            vec![rpc
+                .call("getblockhash", json!([heights[0]]))
+                .await
+                .context("getblockhash failed")?]
+        } else {
+            rpc.call_batch("getblockhash", hash_params)
+                .await
+                .context("getblockhash batch failed")?
+        };
+
+        let block_params: Vec<Value> = hashes.iter().map(|hash| json!([hash, 2])).collect();
+        let blocks: Vec<Value> = if hashes.len() == 1 {
+            vec![rpc
+                .call("getblock", json!([&hashes[0], 2]))
+                .await
+                .context("getblock verbosity=2 failed")?]
+        } else {
+            rpc.call_batch("getblock", block_params)
+                .await
+                .context("getblock batch verbosity=2 failed")?
+        };
+
+        Ok(heights.into_iter().zip(blocks).collect())
     }
 
     async fn reconcile_state_with_node(
@@ -136,10 +248,8 @@ impl IngestWorker {
             warn!(
                 state_height,
                 chain_height,
-                "local chain_state ahead of node tip; initiating rollback"
+                "local chain_state ahead of node tip; waiting for node recovery before reorg checks"
             );
-            self.handle_reorg(chain_height + 1).await?;
-            state_height = self.current_height().await?;
             return Ok(state_height);
         }
 
@@ -264,6 +374,9 @@ impl IngestWorker {
     }
 
     async fn handle_reorg(&self, incoming_height: i32) -> anyhow::Result<()> {
+        self.metrics
+            .ingest_reorgs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         warn!(
             incoming_height,
             reorg_window = self.config.reorg_window,
@@ -314,6 +427,9 @@ impl IngestWorker {
 
         for h in ((fork_height + 1)..=tip.0).rev() {
             self.rollback_one_block(h, &mut tx).await?;
+            self.metrics
+                .ingest_rollback_blocks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         let canonical_fork_hash: String =
@@ -349,6 +465,9 @@ impl IngestWorker {
         height: i32,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> anyhow::Result<()> {
+        let mut holder_deltas: HashMap<(String, String), HolderDeltaAcc> = HashMap::new();
+        let mut created_txids = Vec::new();
+        let mut created_vouts = Vec::new();
         let created_rows =
             sqlx::query_as::<_, (String, i32, String, String, Option<String>, String)>(
                 r#"
@@ -370,24 +489,25 @@ impl IngestWorker {
         for (txid_hex, vout, category_hex, locking_bytecode_hex, locking_address, ft_amount) in
             created_rows
         {
-            self.apply_holder_delta(
-                &category_hex,
-                &locking_bytecode_hex,
-                locking_address.as_deref(),
-                &negate_numeric(&ft_amount),
-                -1,
-                height,
-                tx,
-            )
-            .await?;
-
-            sqlx::query("DELETE FROM token_outpoints WHERE txid = decode($1, 'hex') AND vout = $2")
-                .bind(txid_hex)
-                .bind(vout)
-                .execute(&mut **tx)
-                .await?;
+            accumulate_holder_delta(
+                &mut holder_deltas,
+                HolderDeltaEvent {
+                    category_hex,
+                    locking_bytecode_hex,
+                    locking_address,
+                    ft_delta: negate_numeric(&ft_amount),
+                    utxo_delta: -1,
+                },
+            );
+            created_txids.push(txid_hex);
+            created_vouts.push(vout);
         }
 
+        self.delete_outpoints_batch(&created_txids, &created_vouts, tx)
+            .await?;
+
+        let mut spent_txids = Vec::new();
+        let mut spent_vouts = Vec::new();
         let spent_rows =
             sqlx::query_as::<_, (String, i32, String, String, Option<String>, String)>(
                 r#"
@@ -409,25 +529,30 @@ impl IngestWorker {
         for (txid_hex, vout, category_hex, locking_bytecode_hex, locking_address, ft_amount) in
             spent_rows
         {
-            sqlx::query(
-                "UPDATE token_outpoints SET spent_height = NULL WHERE txid = decode($1, 'hex') AND vout = $2",
-            )
-            .bind(&txid_hex)
-            .bind(vout)
-            .execute(&mut **tx)
+            accumulate_holder_delta(
+                &mut holder_deltas,
+                HolderDeltaEvent {
+                    category_hex,
+                    locking_bytecode_hex,
+                    locking_address,
+                    ft_delta: ft_amount,
+                    utxo_delta: 1,
+                },
+            );
+            spent_txids.push(txid_hex);
+            spent_vouts.push(vout);
+        }
+
+        self.unspend_outpoints_batch(&spent_txids, &spent_vouts, tx)
             .await?;
 
-            self.apply_holder_delta(
-                &category_hex,
-                &locking_bytecode_hex,
-                locking_address.as_deref(),
-                &ft_amount,
-                1,
-                height,
-                tx,
-            )
+        self.metrics.observe_ingest_rows(
+            spent_txids.len() as u64,
+            created_txids.len() as u64,
+            holder_deltas.len() as u64,
+        );
+        self.apply_holder_deltas_batch(height, &holder_deltas, tx)
             .await?;
-        }
 
         sqlx::query("DELETE FROM applied_blocks WHERE height = $1")
             .bind(height)
@@ -437,9 +562,11 @@ impl IngestWorker {
         Ok(())
     }
 
-    async fn apply_block(&self, height: i32, block: &serde_json::Value) -> anyhow::Result<()> {
+    async fn apply_block(&self, height: i32, block: &serde_json::Value) -> anyhow::Result<u64> {
         let mut tx = self.db.pool().begin().await?;
         let mut holder_deltas: HashMap<(String, String), HolderDeltaAcc> = HashMap::new();
+        let mut spends = Vec::new();
+        let mut credits = Vec::new();
 
         let block_txs = block["tx"]
             .as_array()
@@ -463,17 +590,10 @@ impl IngestWorker {
                         continue;
                     };
 
-                    let spend_delta =
-                        self.apply_spend(prev_txid_hex, prev_vout as i32, height, &mut tx)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "failed applying spend at height {height} for input {prev_txid_hex}:{prev_vout} (spending tx {txid_hex})"
-                            )
-                        })?;
-                    if let Some(delta) = spend_delta {
-                        accumulate_holder_delta(&mut holder_deltas, delta);
-                    }
+                    spends.push(SpendInput {
+                        prev_txid_hex: prev_txid_hex.to_string(),
+                        prev_vout: prev_vout as i32,
+                    });
                 }
             }
 
@@ -522,18 +642,34 @@ impl IngestWorker {
                         continue;
                     };
 
-                    let credit_delta = self
-                        .apply_credit(parsed, height, &mut tx)
-                        .await
-                        .with_context(|| {
-                            format!("failed applying token output at height {height}")
-                        })?;
-                    if let Some(delta) = credit_delta {
-                        accumulate_holder_delta(&mut holder_deltas, delta);
-                    }
+                    credits.push(parsed);
                 }
             }
         }
+
+        let spend_deltas = self
+            .apply_spends_batch(&spends, height, &mut tx)
+            .await
+            .with_context(|| format!("failed applying block spends at height {height}"))?;
+        let spend_delta_count = spend_deltas.len() as u64;
+        for delta in spend_deltas {
+            accumulate_holder_delta(&mut holder_deltas, delta);
+        }
+
+        let credit_deltas = self
+            .apply_credits_batch(&credits, height, &mut tx)
+            .await
+            .with_context(|| format!("failed applying block credits at height {height}"))?;
+        let credit_delta_count = credit_deltas.len() as u64;
+        for delta in credit_deltas {
+            accumulate_holder_delta(&mut holder_deltas, delta);
+        }
+
+        self.metrics.observe_ingest_rows(
+            spend_delta_count,
+            credit_delta_count,
+            holder_deltas.len() as u64,
+        );
 
         self.apply_holder_deltas_batch(height, &holder_deltas, &mut tx)
             .await?;
@@ -569,9 +705,9 @@ impl IngestWorker {
         .execute(&mut *tx)
         .await?;
 
+        let commit_started = Instant::now();
         tx.commit().await?;
-
-        Ok(())
+        Ok(commit_started.elapsed().as_millis() as u64)
     }
 
     async fn insert_bcmr_candidate(
@@ -638,12 +774,21 @@ impl IngestWorker {
                 COALESCE(SUM(utxo_count), 0)::integer AS utxo_count
               FROM token_holders
               GROUP BY category
+            ),
+            categories AS (
+              SELECT category FROM token_stats
+              UNION
+              SELECT category FROM holder_rollup
             )
             SELECT COUNT(*)::bigint
-            FROM token_stats s
+            FROM categories c
+            LEFT JOIN token_stats s
+              ON s.category = c.category
             LEFT JOIN holder_rollup h
-              ON h.category = s.category
-            WHERE s.total_ft_supply <> COALESCE(h.total_ft_supply, 0)
+              ON h.category = c.category
+            WHERE s.category IS NULL
+               OR h.category IS NULL
+               OR s.total_ft_supply <> COALESCE(h.total_ft_supply, 0)
                OR s.holder_count <> COALESCE(h.holder_count, 0)
                OR s.utxo_count <> COALESCE(h.utxo_count, 0)
             "#,
@@ -663,110 +808,211 @@ impl IngestWorker {
         Ok(())
     }
 
-    async fn apply_spend(
+    async fn apply_spends_batch(
         &self,
-        prev_txid_hex: &str,
-        prev_vout: i32,
+        spends: &[SpendInput],
         height: i32,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> anyhow::Result<Option<HolderDeltaEvent>> {
-        let spent = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
-            r#"
-            UPDATE token_outpoints
-            SET spent_height = $3
-            WHERE txid = decode($1, 'hex')
-              AND vout = $2
-              AND spent_height IS NULL
-            RETURNING
-              encode(category, 'hex') AS category,
-              encode(locking_bytecode, 'hex') AS locking_bytecode,
-              locking_address,
-              COALESCE(ft_amount::text, '0') AS ft_amount
-            "#,
-        )
-        .bind(prev_txid_hex)
-        .bind(prev_vout)
-        .bind(height)
-        .fetch_optional(&mut **tx)
-        .await?;
-
-        let Some((category_hex, locking_bytecode_hex, locking_address, ft_amount_opt)) = spent
-        else {
-            return Ok(None);
-        };
-
-        let ft_amount = ft_amount_opt.unwrap_or_else(|| "0".to_string());
-
-        Ok(Some(HolderDeltaEvent {
-            category_hex,
-            locking_bytecode_hex,
-            locking_address,
-            ft_delta: negate_numeric(&ft_amount),
-            utxo_delta: -1,
-        }))
-    }
-
-    async fn apply_credit(
-        &self,
-        output: TokenOutput,
-        height: i32,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> anyhow::Result<Option<HolderDeltaEvent>> {
-        let inserted = sqlx::query(
-            r#"
-            INSERT INTO token_outpoints(
-              txid,
-              vout,
-              category,
-              locking_bytecode,
-              locking_address,
-              ft_amount,
-              nft_capability,
-              nft_commitment,
-              satoshis,
-              created_height,
-              spent_height
-            )
-            VALUES(
-              decode($1, 'hex'),
-              $2,
-              decode($3, 'hex'),
-              decode($4, 'hex'),
-              $5,
-              $6::numeric,
-              $7,
-              CASE WHEN $8 IS NULL THEN NULL ELSE decode($8, 'hex') END,
-              $9,
-              $10,
-              NULL
-            )
-            ON CONFLICT (txid, vout) DO NOTHING
-            "#,
-        )
-        .bind(&output.txid_hex)
-        .bind(output.vout)
-        .bind(&output.category_hex)
-        .bind(&output.locking_bytecode_hex)
-        .bind(&output.locking_address)
-        .bind(&output.ft_amount)
-        .bind(output.nft_capability)
-        .bind(&output.nft_commitment_hex)
-        .bind(output.satoshis)
-        .bind(height)
-        .execute(&mut **tx)
-        .await?;
-
-        if inserted.rows_affected() == 0 {
-            return Ok(None);
+    ) -> anyhow::Result<Vec<HolderDeltaEvent>> {
+        if spends.is_empty() {
+            return Ok(Vec::new());
         }
 
-        Ok(Some(HolderDeltaEvent {
-            category_hex: output.category_hex,
-            locking_bytecode_hex: output.locking_bytecode_hex,
-            locking_address: output.locking_address,
-            ft_delta: output.ft_amount,
-            utxo_delta: 1,
-        }))
+        let prev_txid_hexes: Vec<String> = spends
+            .iter()
+            .map(|spend| spend.prev_txid_hex.clone())
+            .collect();
+        let prev_vouts: Vec<i32> = spends.iter().map(|spend| spend.prev_vout).collect();
+
+        let spent_rows = sqlx::query_as::<_, (String, String, Option<String>, String)>(
+            r#"
+            WITH spend_inputs AS (
+              SELECT
+                decode(prev_txid_hex, 'hex') AS txid,
+                prev_vout AS vout
+              FROM UNNEST($1::text[], $2::int[]) AS t(prev_txid_hex, prev_vout)
+            ),
+            spent AS (
+              UPDATE token_outpoints o
+              SET spent_height = $3
+              FROM spend_inputs i
+              WHERE o.txid = i.txid
+                AND o.vout = i.vout
+                AND o.spent_height IS NULL
+              RETURNING
+                encode(o.category, 'hex') AS category_hex,
+                encode(o.locking_bytecode, 'hex') AS locking_bytecode_hex,
+                o.locking_address,
+                COALESCE(o.ft_amount::text, '0') AS ft_amount
+            )
+            SELECT category_hex, locking_bytecode_hex, locking_address, ft_amount
+            FROM spent
+            "#,
+        )
+        .bind(&prev_txid_hexes)
+        .bind(&prev_vouts)
+        .bind(height)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        Ok(spent_rows
+            .into_iter()
+            .map(
+                |(category_hex, locking_bytecode_hex, locking_address, ft_amount)| {
+                    HolderDeltaEvent {
+                        category_hex,
+                        locking_bytecode_hex,
+                        locking_address,
+                        ft_delta: negate_numeric(&ft_amount),
+                        utxo_delta: -1,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    async fn apply_credits_batch(
+        &self,
+        credits: &[TokenOutput],
+        height: i32,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> anyhow::Result<Vec<HolderDeltaEvent>> {
+        if credits.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let txid_hexes: Vec<String> = credits
+            .iter()
+            .map(|credit| credit.txid_hex.clone())
+            .collect();
+        let vouts: Vec<i32> = credits.iter().map(|credit| credit.vout).collect();
+        let category_hexes: Vec<String> = credits
+            .iter()
+            .map(|credit| credit.category_hex.clone())
+            .collect();
+        let locking_bytecode_hexes: Vec<String> = credits
+            .iter()
+            .map(|credit| credit.locking_bytecode_hex.clone())
+            .collect();
+        let locking_addresses: Vec<Option<String>> = credits
+            .iter()
+            .map(|credit| credit.locking_address.clone())
+            .collect();
+        let ft_amounts: Vec<String> = credits
+            .iter()
+            .map(|credit| credit.ft_amount.clone())
+            .collect();
+        let nft_capabilities: Vec<Option<i16>> =
+            credits.iter().map(|credit| credit.nft_capability).collect();
+        let nft_commitment_hexes: Vec<Option<String>> = credits
+            .iter()
+            .map(|credit| credit.nft_commitment_hex.clone())
+            .collect();
+        let satoshis: Vec<i64> = credits.iter().map(|credit| credit.satoshis).collect();
+
+        let inserted_rows = sqlx::query_as::<_, (String, String, Option<String>, String)>(
+            r#"
+            WITH credit_rows AS (
+              SELECT
+                decode(txid_hex, 'hex') AS txid,
+                vout,
+                decode(category_hex, 'hex') AS category,
+                decode(locking_bytecode_hex, 'hex') AS locking_bytecode,
+                locking_address,
+                ft_amount::numeric AS ft_amount,
+                nft_capability,
+                CASE
+                  WHEN nft_commitment_hex IS NULL THEN NULL
+                  ELSE decode(nft_commitment_hex, 'hex')
+                END AS nft_commitment,
+                satoshis
+              FROM UNNEST(
+                $1::text[],
+                $2::int[],
+                $3::text[],
+                $4::text[],
+                $5::text[],
+                $6::text[],
+                $7::smallint[],
+                $8::text[],
+                $9::bigint[]
+              ) AS t(
+                txid_hex,
+                vout,
+                category_hex,
+                locking_bytecode_hex,
+                locking_address,
+                ft_amount,
+                nft_capability,
+                nft_commitment_hex,
+                satoshis
+              )
+            ),
+            inserted AS (
+              INSERT INTO token_outpoints(
+                txid,
+                vout,
+                category,
+                locking_bytecode,
+                locking_address,
+                ft_amount,
+                nft_capability,
+                nft_commitment,
+                satoshis,
+                created_height,
+                spent_height
+              )
+              SELECT
+                txid,
+                vout,
+                category,
+                locking_bytecode,
+                locking_address,
+                ft_amount,
+                nft_capability,
+                nft_commitment,
+                satoshis,
+                $10,
+                NULL
+              FROM credit_rows
+              ON CONFLICT (txid, vout) DO NOTHING
+              RETURNING
+                encode(category, 'hex') AS category_hex,
+                encode(locking_bytecode, 'hex') AS locking_bytecode_hex,
+                locking_address,
+                COALESCE(ft_amount::text, '0') AS ft_amount
+            )
+            SELECT category_hex, locking_bytecode_hex, locking_address, ft_amount
+            FROM inserted
+            "#,
+        )
+        .bind(&txid_hexes)
+        .bind(&vouts)
+        .bind(&category_hexes)
+        .bind(&locking_bytecode_hexes)
+        .bind(&locking_addresses)
+        .bind(&ft_amounts)
+        .bind(&nft_capabilities)
+        .bind(&nft_commitment_hexes)
+        .bind(&satoshis)
+        .bind(height)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        Ok(inserted_rows
+            .into_iter()
+            .map(
+                |(category_hex, locking_bytecode_hex, locking_address, ft_amount)| {
+                    HolderDeltaEvent {
+                        category_hex,
+                        locking_bytecode_hex,
+                        locking_address,
+                        ft_delta: ft_amount,
+                        utxo_delta: 1,
+                    }
+                },
+            )
+            .collect())
     }
 
     async fn apply_holder_deltas_batch(
@@ -795,34 +1041,127 @@ impl IngestWorker {
 
         sqlx::query(
             r#"
-            CREATE TEMP TABLE temp_holder_deltas (
-              category_hex TEXT NOT NULL,
-              locking_bytecode_hex TEXT NOT NULL,
-              locking_address TEXT,
-              ft_delta NUMERIC NOT NULL,
-              utxo_delta INTEGER NOT NULL
-            ) ON COMMIT DROP
-            "#,
-        )
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO temp_holder_deltas(category_hex, locking_bytecode_hex, locking_address, ft_delta, utxo_delta)
-            SELECT
-              category_hex,
-              locking_bytecode_hex,
-              locking_address,
-              ft_delta::numeric,
-              utxo_delta
-            FROM UNNEST(
-              $1::text[],
-              $2::text[],
-              $3::text[],
-              $4::text[],
-              $5::int[]
-            ) AS t(category_hex, locking_bytecode_hex, locking_address, ft_delta, utxo_delta)
+            WITH holder_deltas AS (
+              SELECT
+                decode(category_hex, 'hex') AS category,
+                decode(locking_bytecode_hex, 'hex') AS locking_bytecode,
+                locking_address,
+                ft_delta::numeric AS ft_delta,
+                utxo_delta
+              FROM UNNEST(
+                $1::text[],
+                $2::text[],
+                $3::text[],
+                $4::text[],
+                $5::int[]
+              ) AS t(category_hex, locking_bytecode_hex, locking_address, ft_delta, utxo_delta)
+            ),
+            holder_agg AS (
+              SELECT
+                category,
+                locking_bytecode,
+                MAX(locking_address) FILTER (WHERE locking_address IS NOT NULL) AS locking_address,
+                SUM(ft_delta)::numeric AS ft_delta,
+                SUM(utxo_delta)::integer AS utxo_delta
+              FROM holder_deltas
+              GROUP BY 1, 2
+            ),
+            holder_transition AS (
+              SELECT
+                a.category,
+                a.locking_bytecode,
+                COALESCE(a.locking_address, h.locking_address) AS locking_address,
+                a.ft_delta,
+                a.utxo_delta,
+                CASE WHEN COALESCE(h.ft_balance, 0) > 0 THEN 1 ELSE 0 END AS old_positive,
+                CASE
+                  WHEN GREATEST(COALESCE(h.ft_balance, 0) + a.ft_delta, 0) > 0 THEN 1
+                  ELSE 0
+                END AS new_positive
+              FROM holder_agg a
+              LEFT JOIN token_holders h
+                ON h.category = a.category
+               AND h.locking_bytecode = a.locking_bytecode
+            ),
+            updated_holders AS (
+              UPDATE token_holders h
+              SET
+                locking_address = COALESCE(h.locking_address, t.locking_address),
+                ft_balance = GREATEST(h.ft_balance + t.ft_delta, 0),
+                utxo_count = GREATEST(h.utxo_count + t.utxo_delta, 0),
+                updated_height = $6
+              FROM holder_transition t
+              WHERE h.category = t.category
+                AND h.locking_bytecode = t.locking_bytecode
+              RETURNING h.category, h.locking_bytecode
+            ),
+            inserted_holders AS (
+              INSERT INTO token_holders(category, locking_bytecode, locking_address, ft_balance, utxo_count, updated_height)
+              SELECT
+                t.category,
+                t.locking_bytecode,
+                t.locking_address,
+                GREATEST(t.ft_delta, 0),
+                GREATEST(t.utxo_delta, 0),
+                $6
+              FROM holder_transition t
+              LEFT JOIN updated_holders u
+                ON u.category = t.category
+               AND u.locking_bytecode = t.locking_bytecode
+              WHERE u.category IS NULL
+              RETURNING category, locking_bytecode
+            ),
+            deleted_holders AS (
+              DELETE FROM token_holders h
+              USING holder_agg a
+              WHERE h.category = a.category
+                AND h.locking_bytecode = a.locking_bytecode
+                AND h.ft_balance = 0
+                AND h.utxo_count = 0
+              RETURNING h.category
+            ),
+            category_delta AS (
+              SELECT
+                category,
+                SUM(ft_delta)::numeric AS ft_delta,
+                SUM(utxo_delta)::integer AS utxo_delta,
+                SUM(new_positive - old_positive)::integer AS holder_delta
+              FROM holder_transition
+              GROUP BY category
+            ),
+            updated_stats AS (
+              UPDATE token_stats s
+              SET
+                total_ft_supply = GREATEST(s.total_ft_supply + c.ft_delta, 0),
+                holder_count = GREATEST(s.holder_count + c.holder_delta, 0),
+                utxo_count = GREATEST(s.utxo_count + c.utxo_delta, 0),
+                updated_height = $6,
+                updated_at = now()
+              FROM category_delta c
+              WHERE s.category = c.category
+              RETURNING s.category
+            ),
+            inserted_stats AS (
+              INSERT INTO token_stats(category, total_ft_supply, holder_count, utxo_count, updated_height, updated_at)
+              SELECT
+                c.category,
+                GREATEST(c.ft_delta, 0),
+                GREATEST(c.holder_delta, 0),
+                GREATEST(c.utxo_delta, 0),
+                $6,
+                now()
+              FROM category_delta c
+              LEFT JOIN updated_stats u
+                ON u.category = c.category
+              WHERE u.category IS NULL
+              RETURNING category
+            )
+            DELETE FROM token_stats s
+            USING category_delta c
+            WHERE s.category = c.category
+              AND s.total_ft_supply = 0
+              AND s.holder_count = 0
+              AND s.utxo_count = 0
             "#,
         )
         .bind(&category_hexes)
@@ -830,297 +1169,70 @@ impl IngestWorker {
         .bind(&locking_addresses)
         .bind(&ft_deltas)
         .bind(&utxo_deltas)
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TEMP TABLE temp_holder_agg ON COMMIT DROP AS
-            SELECT
-              decode(category_hex, 'hex') AS category,
-              decode(locking_bytecode_hex, 'hex') AS locking_bytecode,
-              MAX(locking_address) FILTER (WHERE locking_address IS NOT NULL) AS locking_address,
-              SUM(ft_delta)::numeric AS ft_delta,
-              SUM(utxo_delta)::integer AS utxo_delta
-            FROM temp_holder_deltas
-            GROUP BY 1, 2
-            "#,
-        )
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TEMP TABLE temp_holder_transition ON COMMIT DROP AS
-            SELECT
-              a.category,
-              a.locking_bytecode,
-              COALESCE(a.locking_address, h.locking_address) AS locking_address,
-              a.ft_delta,
-              a.utxo_delta,
-              CASE WHEN COALESCE(h.ft_balance, 0) > 0 THEN 1 ELSE 0 END AS old_positive,
-              CASE WHEN GREATEST(COALESCE(h.ft_balance, 0) + a.ft_delta, 0) > 0 THEN 1 ELSE 0 END AS new_positive
-            FROM temp_holder_agg a
-            LEFT JOIN token_holders h
-              ON h.category = a.category
-             AND h.locking_bytecode = a.locking_bytecode
-            "#,
-        )
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            UPDATE token_holders h
-            SET
-              locking_address = COALESCE(h.locking_address, t.locking_address),
-              ft_balance = GREATEST(h.ft_balance + t.ft_delta, 0),
-              utxo_count = GREATEST(h.utxo_count + t.utxo_delta, 0),
-              updated_height = $1
-            FROM temp_holder_transition t
-            WHERE h.category = t.category
-              AND h.locking_bytecode = t.locking_bytecode
-            "#,
-        )
         .bind(height)
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO token_holders(category, locking_bytecode, locking_address, ft_balance, utxo_count, updated_height)
-            SELECT
-              t.category,
-              t.locking_bytecode,
-              t.locking_address,
-              GREATEST(t.ft_delta, 0),
-              GREATEST(t.utxo_delta, 0),
-              $1
-            FROM temp_holder_transition t
-            LEFT JOIN token_holders h
-              ON h.category = t.category
-             AND h.locking_bytecode = t.locking_bytecode
-            WHERE h.category IS NULL
-            "#,
-        )
-        .bind(height)
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            DELETE FROM token_holders h
-            USING temp_holder_agg a
-            WHERE h.category = a.category
-              AND h.locking_bytecode = a.locking_bytecode
-              AND h.ft_balance = 0
-              AND h.utxo_count = 0
-            "#,
-        )
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TEMP TABLE temp_category_delta ON COMMIT DROP AS
-            SELECT
-              category,
-              SUM(ft_delta)::numeric AS ft_delta,
-              SUM(utxo_delta)::integer AS utxo_delta,
-              SUM(new_positive - old_positive)::integer AS holder_delta
-            FROM temp_holder_transition
-            GROUP BY category
-            "#,
-        )
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            UPDATE token_stats s
-            SET
-              total_ft_supply = GREATEST(s.total_ft_supply + c.ft_delta, 0),
-              holder_count = GREATEST(s.holder_count + c.holder_delta, 0),
-              utxo_count = GREATEST(s.utxo_count + c.utxo_delta, 0),
-              updated_height = $1,
-              updated_at = now()
-            FROM temp_category_delta c
-            WHERE s.category = c.category
-            "#,
-        )
-        .bind(height)
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO token_stats(category, total_ft_supply, holder_count, utxo_count, updated_height, updated_at)
-            SELECT
-              c.category,
-              GREATEST(c.ft_delta, 0),
-              GREATEST(c.holder_delta, 0),
-              GREATEST(c.utxo_delta, 0),
-              $1,
-              now()
-            FROM temp_category_delta c
-            LEFT JOIN token_stats s
-              ON s.category = c.category
-            WHERE s.category IS NULL
-            "#,
-        )
-        .bind(height)
-        .execute(&mut **tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            DELETE FROM token_stats s
-            USING temp_category_delta c
-            WHERE s.category = c.category
-              AND s.total_ft_supply = 0
-              AND s.holder_count = 0
-              AND s.utxo_count = 0
-            "#,
-        )
         .execute(&mut **tx)
         .await?;
 
         Ok(())
     }
 
-    async fn apply_holder_delta(
+    async fn delete_outpoints_batch(
         &self,
-        category_hex: &str,
-        locking_bytecode_hex: &str,
-        locking_address: Option<&str>,
-        ft_delta: &str,
-        utxo_delta: i32,
-        height: i32,
+        txid_hexes: &[String],
+        vouts: &[i32],
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> anyhow::Result<()> {
-        let old_balance: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT ft_balance::text
-            FROM token_holders
-            WHERE category = decode($1, 'hex')
-              AND locking_bytecode = decode($2, 'hex')
-            FOR UPDATE
-            "#,
-        )
-        .bind(category_hex)
-        .bind(locking_bytecode_hex)
-        .fetch_optional(&mut **tx)
-        .await?;
-
-        let new_balance: String = sqlx::query_scalar(
-            r#"
-            INSERT INTO token_holders(category, locking_bytecode, locking_address, ft_balance, utxo_count, updated_height)
-            VALUES(decode($1, 'hex'), decode($2, 'hex'), $3, $4::numeric, GREATEST($5, 0), $6)
-            ON CONFLICT (category, locking_bytecode)
-            DO UPDATE SET
-              locking_address = COALESCE(token_holders.locking_address, EXCLUDED.locking_address),
-              ft_balance = GREATEST(token_holders.ft_balance + EXCLUDED.ft_balance, 0),
-              utxo_count = GREATEST(token_holders.utxo_count + $5, 0),
-              updated_height = $6
-            RETURNING ft_balance::text
-            "#,
-        )
-        .bind(category_hex)
-        .bind(locking_bytecode_hex)
-        .bind(locking_address)
-        .bind(ft_delta)
-        .bind(utxo_delta)
-        .bind(height)
-        .fetch_one(&mut **tx)
-        .await?;
-
-        let old_positive = old_balance
-            .as_deref()
-            .map(is_positive_numeric)
-            .unwrap_or(false);
-        let new_positive = is_positive_numeric(&new_balance);
-        let holder_delta = match (old_positive, new_positive) {
-            (false, true) => 1,
-            (true, false) => -1,
-            _ => 0,
-        };
-
-        self.bump_stats(category_hex, ft_delta, utxo_delta, holder_delta, height, tx)
-            .await?;
-
-        sqlx::query(
-            r#"
-            DELETE FROM token_holders
-            WHERE category = decode($1, 'hex')
-              AND locking_bytecode = decode($2, 'hex')
-              AND ft_balance = 0
-              AND utxo_count = 0
-            "#,
-        )
-        .bind(category_hex)
-        .bind(locking_bytecode_hex)
-        .execute(&mut **tx)
-        .await?;
-
-        Ok(())
-    }
-
-    async fn bump_stats(
-        &self,
-        category_hex: &str,
-        ft_delta: &str,
-        utxo_delta: i32,
-        holder_delta: i32,
-        height: i32,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO token_stats(category, total_ft_supply, holder_count, utxo_count, updated_height, updated_at)
-            VALUES(decode($1, 'hex'), $2::numeric, 0, GREATEST($3, 0), $4, now())
-            ON CONFLICT (category)
-            DO UPDATE SET
-              total_ft_supply = GREATEST(token_stats.total_ft_supply + $2::numeric, 0),
-              utxo_count = GREATEST(token_stats.utxo_count + $3, 0),
-              updated_height = $4,
-              updated_at = now()
-            "#,
-        )
-        .bind(category_hex)
-        .bind(ft_delta)
-        .bind(utxo_delta)
-        .bind(height)
-        .execute(&mut **tx)
-        .await?;
-
-        if holder_delta != 0 {
-            sqlx::query(
-                r#"
-                UPDATE token_stats
-                SET
-                  holder_count = GREATEST(holder_count + $2, 0),
-                  updated_height = $3,
-                  updated_at = now()
-                WHERE category = decode($1, 'hex')
-                "#,
-            )
-            .bind(category_hex)
-            .bind(holder_delta)
-            .bind(height)
-            .execute(&mut **tx)
-            .await?;
+        if txid_hexes.is_empty() {
+            return Ok(());
         }
 
         sqlx::query(
             r#"
-            DELETE FROM token_stats
-            WHERE category = decode($1, 'hex')
-              AND total_ft_supply = 0
-              AND holder_count = 0
-              AND utxo_count = 0
+            DELETE FROM token_outpoints o
+            USING (
+              SELECT
+                decode(txid_hex, 'hex') AS txid,
+                vout
+              FROM UNNEST($1::text[], $2::int[]) AS t(txid_hex, vout)
+            ) d
+            WHERE o.txid = d.txid
+              AND o.vout = d.vout
             "#,
         )
-        .bind(category_hex)
+        .bind(txid_hexes)
+        .bind(vouts)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn unspend_outpoints_batch(
+        &self,
+        txid_hexes: &[String],
+        vouts: &[i32],
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> anyhow::Result<()> {
+        if txid_hexes.is_empty() {
+            return Ok(());
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE token_outpoints o
+            SET spent_height = NULL
+            FROM (
+              SELECT
+                decode(txid_hex, 'hex') AS txid,
+                vout
+              FROM UNNEST($1::text[], $2::int[]) AS t(txid_hex, vout)
+            ) u
+            WHERE o.txid = u.txid
+              AND o.vout = u.vout
+            "#,
+        )
+        .bind(txid_hexes)
+        .bind(vouts)
         .execute(&mut **tx)
         .await?;
 
@@ -1222,10 +1334,6 @@ fn accumulate_holder_delta(
 
 fn parse_bigint(value: &str) -> BigInt {
     value.parse::<BigInt>().unwrap_or_else(|_| BigInt::zero())
-}
-
-fn is_positive_numeric(num: &str) -> bool {
-    num.trim() != "0"
 }
 
 fn negate_numeric(num: &str) -> String {

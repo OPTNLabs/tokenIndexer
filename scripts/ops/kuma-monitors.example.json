@@ -1,0 +1,44 @@
+{
+  "monitors": [
+    {
+      "name": "tokenIndexer - public health",
+      "type": "http",
+      "url": "https://tokenindex.optnlabs.com/health",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "priceFeed - public health",
+      "type": "http",
+      "url": "https://price.optnlabs.com/health",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "upload relay - public health",
+      "type": "http",
+      "url": "https://upload.optnlabs.com/health",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "bch-mainnet tokenIndexer - LAN health",
+      "type": "http",
+      "url": "http://192.168.31.123:8080/health",
+      "interval": 60,
+      "timeout": 48,
+      "accepted_statuscodes": ["200-299"]
+    },
+    {
+      "name": "bch-chipnet Fulcrum WSS",
+      "type": "port",
+      "hostname": "electrum-chipnet.optnlabs.com",
+      "port": 50004,
+      "interval": 60,
+      "timeout": 48
+    }
+  ]
+}

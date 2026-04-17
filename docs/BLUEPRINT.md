@@ -165,7 +165,7 @@ Response:
 {
   "holders": [
     {
-      "locking_bytecode": "<hex>",
+      "address": "<address>",
       "ft_balance": "9000000000",
       "utxo_count": 7,
       "updated_height": 850123
@@ -184,7 +184,7 @@ Response:
 {
   "holders": [
     {
-      "locking_bytecode": "<hex>",
+      "address": "<address>",
       "ft_balance": "1000",
       "utxo_count": 2,
       "updated_height": 850123
@@ -194,7 +194,7 @@ Response:
 }
 ```
 
-### 4. `GET /v1/token/:category/holder/:lockingBytecode`
+### 4. `GET /v1/token/:category/holder/:address`
 
 Response:
 ```json
@@ -206,7 +206,7 @@ Response:
 }
 ```
 
-### 5. `GET /v1/holder/:lockingBytecode/tokens`
+### 5. `GET /v1/address/:address/tokens`
 
 Response:
 ```json
@@ -407,8 +407,8 @@ curl -sS http://127.0.0.1:8080/v1/token/<category>/summary
 curl -sS http://127.0.0.1:8080/v1/bcmr/<category>
 curl -sS "http://127.0.0.1:8080/v1/token/<category>/holders/top?n=50"
 curl -sS "http://127.0.0.1:8080/v1/token/<category>/holders?limit=100"
-curl -sS http://127.0.0.1:8080/v1/token/<category>/holder/<lockingBytecode>
-curl -sS http://127.0.0.1:8080/v1/holder/<lockingBytecode>/tokens
+curl -sS http://127.0.0.1:8080/v1/token/<category>/holder/<address>
+curl -sS http://127.0.0.1:8080/v1/address/<address>/tokens
 ```
 
 ## 7) Verification + Load Testing Checklist

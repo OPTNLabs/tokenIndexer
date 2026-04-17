@@ -205,6 +205,16 @@ pub struct Config {
     #[arg(long, env = "TOKENINDEX_RPC_BATCH_SIZE", default_value_t = 100)]
     pub rpc_batch_size: usize,
 
+    #[arg(long, env = "TOKENINDEX_RPC_PREFETCH_BATCHES", default_value_t = 3)]
+    pub rpc_prefetch_batches: usize,
+
+    #[arg(
+        long,
+        env = "TOKENINDEX_DB_INGEST_SYNCHRONOUS_COMMIT",
+        default_value = "on"
+    )]
+    pub db_ingest_synchronous_commit: String,
+
     #[arg(long, env = "TOKENINDEX_CACHE_MAX_ITEMS", default_value_t = 50_000)]
     pub cache_max_items: u64,
 
@@ -358,6 +368,9 @@ impl Config {
             db_pool_max_connections: self.db_max_connections,
             db_api_pool_max_connections: self.api_db_pool_size(),
             db_ingest_pool_max_connections: self.ingest_db_pool_size(),
+            rpc_batch_size: self.rpc_batch_size,
+            rpc_prefetch_batches: self.rpc_prefetch_batches,
+            db_ingest_synchronous_commit: self.db_ingest_synchronous_commit.clone(),
         }
     }
 }
@@ -380,6 +393,9 @@ pub struct StartupSnapshot {
     pub db_pool_max_connections: u32,
     pub db_api_pool_max_connections: u32,
     pub db_ingest_pool_max_connections: u32,
+    pub rpc_batch_size: usize,
+    pub rpc_prefetch_batches: usize,
+    pub db_ingest_synchronous_commit: String,
 }
 
 fn redact_url(raw: &str) -> String {
@@ -400,7 +416,10 @@ fn apply_chipnet_aliases() {
         ("TOKENINDEX_CHIPNET_RPC_URL", "TOKENINDEX_RPC_URL"),
         ("TOKENINDEX_CHIPNET_RPC_USER", "TOKENINDEX_RPC_USER"),
         ("TOKENINDEX_CHIPNET_RPC_PASS", "TOKENINDEX_RPC_PASS"),
-        ("TOKENINDEX_CHIPNET_EXPECTED_CHAIN", "TOKENINDEX_EXPECTED_CHAIN"),
+        (
+            "TOKENINDEX_CHIPNET_EXPECTED_CHAIN",
+            "TOKENINDEX_EXPECTED_CHAIN",
+        ),
         (
             "TOKENINDEX_CHIPNET_ZMQ_BLOCK_ENDPOINT",
             "TOKENINDEX_ZMQ_BLOCK_ENDPOINT",

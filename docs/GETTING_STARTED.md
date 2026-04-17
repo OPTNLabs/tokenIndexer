@@ -38,6 +38,25 @@ TOKENINDEX_DATABASE_URL=postgres://tokenindex:tokenindex@postgres:5432/tokeninde
 TOKENINDEX_CHIPNET_DB_SCHEMA=chipnet
 ```
 
+Recommended for faster bootstrap:
+
+```bash
+TOKENINDEX_BCMR_ENABLED=false
+TOKENINDEX_BCMR_BACKFILL_ENABLED=false
+TOKENINDEX_MEMPOOL_ENABLED=false
+TOKENINDEX_RECONCILE_ENABLED=false
+TOKENINDEX_APPLY_POSTGRES_TUNING=true
+TOKENINDEX_RPC_BATCH_SIZE=100
+TOKENINDEX_RPC_PREFETCH_BATCHES=3
+```
+
+If you have a PostgreSQL read replica, point API reads at it and keep ingest on primary:
+
+```bash
+TOKENINDEX_DATABASE_READ_URL=postgres://tokenindex:tokenindex@<replica-host>:5432/tokenindex
+TOKENINDEX_DB_INGEST_SYNCHRONOUS_COMMIT=off
+```
+
 ## 3. Start Services
 
 ```bash
@@ -81,7 +100,7 @@ Optional smoke script:
 
 ```bash
 CATEGORY=<token_category_hex> \
-LOCKING=<locking_bytecode_hex> \
+ADDRESS=<cashaddr_or_other_indexed_address> \
 BASE_URL=http://127.0.0.1:8080 \
 scripts/integration/api-smoke.sh
 ```

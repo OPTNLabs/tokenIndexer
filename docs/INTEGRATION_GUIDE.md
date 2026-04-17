@@ -18,8 +18,8 @@ Authorization: Bearer <token>
 2. `GET /v1/tokens/known?limit=50`
 3. `GET /v1/token/:category/summary`
 4. `GET /v1/token/:category/holders/top?n=50`
-5. `GET /v1/token/:category/holder/:lockingBytecode`
-6. `GET /v1/holder/:lockingBytecode/tokens?limit=100`
+5. `GET /v1/token/:category/holder/:address`
+6. `GET /v1/address/:address/tokens?limit=100`
 7. Optional metadata: `GET /v1/bcmr/:category`
 
 ## 3. Behaviors to Model Correctly
@@ -34,14 +34,14 @@ Authorization: Bearer <token>
 ```bash
 BASE_URL="http://127.0.0.1:8080"
 CATEGORY="<category_hex>"
-LOCKING="<locking_bytecode_hex>"
+ADDRESS="<cashaddr_or_other_indexed_address>"
 
 curl -sS "$BASE_URL/health"
 curl -sS "$BASE_URL/v1/tokens/known?limit=10"
 curl -sS "$BASE_URL/v1/token/$CATEGORY/summary"
 curl -sS "$BASE_URL/v1/token/$CATEGORY/holders/top?n=5"
-curl -sS "$BASE_URL/v1/token/$CATEGORY/holder/$LOCKING"
-curl -sS "$BASE_URL/v1/holder/$LOCKING/tokens?limit=25"
+curl -sS "$BASE_URL/v1/token/$CATEGORY/holder/$ADDRESS"
+curl -sS "$BASE_URL/v1/address/$ADDRESS/tokens?limit=25"
 ```
 
 ## 5. JavaScript/TypeScript Client Snippet
@@ -79,7 +79,7 @@ Use `ETag`/`If-None-Match` and handle `304 Not Modified`.
 
 ## 7. Error Handling
 
-- `400`: bad category/locking/cursor
+- `400`: bad category/address/cursor
 - `401`: missing/invalid bearer token
 - `403`: IP blocked by allowlist
 - `404`: not found
@@ -92,6 +92,6 @@ Retry only transient failures (`429`, `500`, network timeout).
 
 - Health endpoints are green
 - App can load `tokens/known`
-- Summary + holders + holder tokens render correctly
+- Summary + holders + address token list render correctly
 - Retry/backoff logic in place
 - Auth behavior tested (if enabled)

@@ -91,6 +91,9 @@ fn log_config(label: &str, config: &Config) {
         db_pool_max_connections = snapshot.db_pool_max_connections,
         db_api_pool_max_connections = snapshot.db_api_pool_max_connections,
         db_ingest_pool_max_connections = snapshot.db_ingest_pool_max_connections,
+        rpc_batch_size = snapshot.rpc_batch_size,
+        rpc_prefetch_batches = snapshot.rpc_prefetch_batches,
+        db_ingest_synchronous_commit = %snapshot.db_ingest_synchronous_commit,
         log_level = %snapshot.log_level,
         "loaded startup configuration"
     );
@@ -106,6 +109,7 @@ async fn run_combined_stack(primary: Config, mainnet: Config) -> anyhow::Result<
         &primary.db_schema,
         primary.ingest_db_pool_size(),
         primary.db_statement_timeout_ms,
+        Some(primary.db_ingest_synchronous_commit.as_str()),
     )
     .await
     .with_context(|| format!("failed to connect ingest postgres pool ({primary_chain})"))?;
@@ -124,9 +128,10 @@ async fn run_combined_stack(primary: Config, mainnet: Config) -> anyhow::Result<
         &primary.db_schema,
         primary.api_db_pool_size(),
         primary.db_statement_timeout_ms,
+        None,
     )
-        .await
-        .with_context(|| format!("failed to connect api postgres pool ({primary_chain})"))?;
+    .await
+    .with_context(|| format!("failed to connect api postgres pool ({primary_chain})"))?;
 
     info!(chain = %mainnet_chain, "initializing mainnet ingest database");
     let mainnet_db_ingest = Database::connect(
@@ -134,6 +139,7 @@ async fn run_combined_stack(primary: Config, mainnet: Config) -> anyhow::Result<
         &mainnet.db_schema,
         mainnet.ingest_db_pool_size(),
         mainnet.db_statement_timeout_ms,
+        Some(mainnet.db_ingest_synchronous_commit.as_str()),
     )
     .await
     .with_context(|| format!("failed to connect ingest postgres pool ({mainnet_chain})"))?;
@@ -152,6 +158,7 @@ async fn run_combined_stack(primary: Config, mainnet: Config) -> anyhow::Result<
         &mainnet.db_schema,
         mainnet.api_db_pool_size(),
         mainnet.db_statement_timeout_ms,
+        None,
     )
     .await
     .with_context(|| format!("failed to connect api postgres pool ({mainnet_chain})"))?;
@@ -165,7 +172,11 @@ async fn run_combined_stack(primary: Config, mainnet: Config) -> anyhow::Result<
     let primary_state = Arc::new(primary_state_raw);
     info!("application state initialized for unified stack");
 
-    let primary_ingest_worker = IngestWorker::new(primary.clone(), primary_db_ingest.clone())?;
+    let primary_ingest_worker = IngestWorker::new(
+        primary.clone(),
+        primary_db_ingest.clone(),
+        primary_state.metrics.clone(),
+    )?;
     let primary_bcmr_worker = BcmrWorker::new(primary.clone(), primary_db_ingest.clone())?;
     let primary_reconcile_worker =
         ReconciliationWorker::new(primary.clone(), primary_db_ingest.clone());
@@ -175,7 +186,11 @@ async fn run_combined_stack(primary: Config, mainnet: Config) -> anyhow::Result<
         primary_state.mempool_snapshot.clone(),
     )?;
 
-    let mainnet_ingest_worker = IngestWorker::new(mainnet.clone(), mainnet_db_ingest.clone())?;
+    let mainnet_ingest_worker = IngestWorker::new(
+        mainnet.clone(),
+        mainnet_db_ingest.clone(),
+        primary_state.metrics.clone(),
+    )?;
     let mainnet_bcmr_worker = BcmrWorker::new(mainnet.clone(), mainnet_db_ingest.clone())?;
     let mainnet_reconcile_worker =
         ReconciliationWorker::new(mainnet.clone(), mainnet_db_ingest.clone());
@@ -279,6 +294,7 @@ async fn run_stack(config: Config) -> anyhow::Result<()> {
         &config.db_schema,
         config.ingest_db_pool_size(),
         config.db_statement_timeout_ms,
+        Some(config.db_ingest_synchronous_commit.as_str()),
     )
     .await
     .with_context(|| format!("failed to connect ingest postgres pool ({chain})"))?;
@@ -298,13 +314,15 @@ async fn run_stack(config: Config) -> anyhow::Result<()> {
         &config.db_schema,
         config.api_db_pool_size(),
         config.db_statement_timeout_ms,
+        None,
     )
-        .await
-        .with_context(|| format!("failed to connect api postgres pool ({chain})"))?;
+    .await
+    .with_context(|| format!("failed to connect api postgres pool ({chain})"))?;
 
     let state = Arc::new(AppState::new(config.clone(), db_api.clone()).await?);
     info!(chain = %chain, "application state initialized");
-    let ingest_worker = IngestWorker::new(config.clone(), db_ingest.clone())?;
+    let ingest_worker =
+        IngestWorker::new(config.clone(), db_ingest.clone(), state.metrics.clone())?;
     let bcmr_worker = BcmrWorker::new(config.clone(), db_ingest.clone())?;
     let reconcile_worker = ReconciliationWorker::new(config.clone(), db_ingest.clone());
     let mempool_worker = MempoolWorker::new(
