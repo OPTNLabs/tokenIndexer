@@ -8,6 +8,7 @@ SELECT
   s.utxo_count,
   s.updated_height,
   s.updated_at,
+  encode(r.txid, 'hex') AS registry_txid_hex,
   m.symbol AS symbol,
   m.name AS name,
   m.description AS description,

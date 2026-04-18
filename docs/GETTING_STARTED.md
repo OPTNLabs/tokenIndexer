@@ -88,10 +88,18 @@ What to verify in `/health/details`:
 curl -sS "http://127.0.0.1:8080/v1/tokens/known?limit=5"
 ```
 
+Public deployment:
+
+```bash
+curl -sS "https://tokenindex.optnlabs.com/v1/tokens/known?limit=5"
+curl -sS "https://tokenindex.optnlabs.com/api/status/latest-block"
+```
+
 If you already know a category:
 
 ```bash
 CATEGORY=<token_category_hex>
+curl -sS "http://127.0.0.1:8080/v1/token/$CATEGORY"
 curl -sS "http://127.0.0.1:8080/v1/token/$CATEGORY/summary"
 curl -sS "http://127.0.0.1:8080/v1/token/$CATEGORY/holders/top?n=10"
 ```
@@ -104,6 +112,13 @@ ADDRESS=<cashaddr_or_other_indexed_address> \
 BASE_URL=http://127.0.0.1:8080 \
 scripts/integration/api-smoke.sh
 ```
+
+The smoke script now checks the unified token summary, BCMR metadata, and authchain provenance in addition to holders and eligibility.
+
+Compatibility note:
+
+- Existing `bcmr-indexer` clients can point their base URL at `https://tokenindex.optnlabs.com/api` and keep the same request paths.
+- New integrations should use the native `/v1/...` routes.
 
 ## 6. Quick Troubleshooting
 

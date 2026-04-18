@@ -21,6 +21,7 @@
 - `tokenindex_ingest_last_lag_blocks` should trend toward zero after startup catch-up
 - `bcmr_candidates` should not accumulate in `processing`/`retry` unexpectedly
 - `bcmr_category_metadata` should populate for known BCMR token categories
+- public endpoint `https://tokenindex.optnlabs.com/health` should remain healthy after rollout
 
 Useful ingest-specific `/metrics` series:
 
@@ -84,6 +85,8 @@ Useful ingest-specific `/metrics` series:
 ```bash
 curl -sS http://127.0.0.1:8080/health
 curl -sS "http://127.0.0.1:8080/v1/bcmr/<category-hex>"
+curl -sS "http://127.0.0.1:8080/api/tokens/<category-hex>"
+curl -sS "http://127.0.0.1:8080/api/registries/<category-hex>/latest"
 ```
 
 ```sql
@@ -244,8 +247,39 @@ Expected TokenIndex behavior:
 1. Back up Postgres
 2. Deploy new image
 3. Let automatic SQL migrations run on startup
-4. Confirm `/health`, `/metrics`, `/v1/token/*`, and `/v1/bcmr/*` correctness
+4. Confirm `/health`, `/metrics`, `/v1/token/*`, `/v1/bcmr/*`, and legacy `/api/*` BCMR routes
 5. Monitor reorg/log errors for first 15 minutes
+
+## Release and Rollback
+
+Release from a clean checkout when publishing a known commit:
+
+```bash
+git clone <repo-url> /tmp/tokenIndexer-release
+cd /tmp/tokenIndexer-release
+git checkout <commit>
+docker compose -p tokenindexer up -d --build
+```
+
+Validate both native and compatibility routes after rollout:
+
+```bash
+curl -sS https://tokenindex.optnlabs.com/health
+curl -sS "https://tokenindex.optnlabs.com/v1/tokens/known?limit=3"
+curl -sS "https://tokenindex.optnlabs.com/v1/token/<category-hex>"
+curl -sS "https://tokenindex.optnlabs.com/api/status/latest-block"
+curl -sS "https://tokenindex.optnlabs.com/api/tokens/<category-hex>"
+curl -sS "https://tokenindex.optnlabs.com/v1/token/<category-hex>/bcmr"
+curl -sS "https://tokenindex.optnlabs.com/v1/token/<category-hex>/authchain/head"
+```
+
+Rollback is commit-based:
+
+```bash
+cd /tmp/tokenIndexer-release
+git checkout <previous_commit>
+docker compose -p tokenindexer up -d --build
+```
 
 ## Performance Verification Checklist
 

@@ -12,12 +12,13 @@ use axum::Json;
 use base64::Engine;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, warn};
 
 use crate::api::cache::{CachedResponse, RedisCacheRecord};
+use crate::api::legacy::rpc_for_category;
 use crate::api::{AppState, IpCidr};
 use crate::db::{queries, Database};
 use crate::model::{MempoolCategoryView, MempoolHolderDelta};
@@ -121,6 +122,7 @@ struct TokenSummaryRow {
     utxo_count: i32,
     updated_height: i32,
     updated_at: chrono::DateTime<chrono::Utc>,
+    registry_txid_hex: Option<String>,
     symbol: Option<String>,
     name: Option<String>,
     description: Option<String>,
@@ -600,6 +602,12 @@ pub async fn token_summary(
             return match row {
                 Ok(Some(row)) => {
                     let bcmr = TokenBcmrMetadata::from(&row);
+                    let authchain_head = authchain_head_for_summary(
+                        &state,
+                        &row.category,
+                        &row.registry_txid_hex,
+                    )
+                    .await;
                     let body = build_unified_summary_body(
                         &row.category,
                         &row.total_supply,
@@ -610,6 +618,7 @@ pub async fn token_summary(
                         active_chain_name(&state, use_fallback),
                         mempool_view.as_ref(),
                         &bcmr,
+                        authchain_head.as_ref(),
                     );
                     cache_and_respond(&state, &cache_key, body, row.updated_height, 10, &headers)
                 }
@@ -643,6 +652,12 @@ pub async fn token_summary(
     match row {
         Ok(Some(row)) => {
             let bcmr = TokenBcmrMetadata::from(&row);
+            let authchain_head = authchain_head_for_summary(
+                &state,
+                &row.category,
+                &row.registry_txid_hex,
+            )
+            .await;
             let body = build_unified_summary_body(
                 &row.category,
                 &row.total_supply,
@@ -653,6 +668,7 @@ pub async fn token_summary(
                 active_chain_name(&state, use_fallback),
                 mempool_view.as_ref(),
                 &bcmr,
+                authchain_head.as_ref(),
             );
             cache_and_respond(&state, &cache_key, body, row.updated_height, 10, &headers)
         }
@@ -2135,6 +2151,7 @@ fn build_unified_summary_body(
     chain: &str,
     mempool_view: Option<&MempoolCategoryView>,
     bcmr: &TokenBcmrMetadata,
+    authchain_head: Option<&Value>,
 ) -> serde_json::Value {
     let (u_credits, u_debits, u_net, u_utxo, u_txs, u_nfts) = mempool_view
         .map(|v| {
@@ -2158,6 +2175,7 @@ fn build_unified_summary_body(
         "name": bcmr.name,
         "symbol": bcmr.symbol,
         "bcmr": bcmr_metadata_json(bcmr),
+        "authchain_head": authchain_head.cloned().unwrap_or(Value::Null),
         "total_supply": effective_supply,
         "holder_count": holder_count,
         "utxo_count": effective_utxos,
@@ -2182,6 +2200,36 @@ fn build_unified_summary_body(
             "utxo_count": effective_utxos,
         }
     })
+}
+
+async fn authchain_head_for_summary(
+    state: &Arc<AppState>,
+    category: &str,
+    registry_txid_hex: &Option<String>,
+) -> Option<Value> {
+    let txid = registry_txid_hex.as_deref()?;
+    let rpc = rpc_for_category(state, category).await.ok()?;
+
+    let tx: Value = rpc.call("getrawtransaction", json!([txid, true])).await.ok()?;
+    let owner = tx
+        .get("vout")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|vout| vout.get("scriptPubKey"))
+        .and_then(|spk| {
+            spk.get("address").or_else(|| {
+                spk.get("addresses")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+            })
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    Some(json!({
+        "txid": txid,
+        "owner": owner
+    }))
 }
 
 fn bcmr_metadata_json(bcmr: &TokenBcmrMetadata) -> serde_json::Value {
@@ -2223,6 +2271,53 @@ fn active_chain_name<'a>(state: &'a Arc<AppState>, use_fallback: bool) -> &'a st
         fallback_chain_name(state)
     } else {
         state.config.expected_chain.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn unified_summary_includes_bcmr_and_authchain_head() {
+        let bcmr = TokenBcmrMetadata {
+            symbol: Some("TOK".to_string()),
+            name: Some("Token".to_string()),
+            description: Some("Desc".to_string()),
+            decimals: Some(8),
+            icon_uri: Some("ipfs://icon".to_string()),
+            token_uri: Some("ipfs://token".to_string()),
+            latest_revision: Some(Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap()),
+            identity_snapshot: Some(json!({"token":{"category":"aa"}})),
+            nft_types: Some(json!({"01":{"name":"NFT"}})),
+            source_url: Some("https://example.com/registry.json".to_string()),
+            content_hash_hex: Some("abcd".to_string()),
+            claimed_hash_hex: Some("ef01".to_string()),
+            request_status: Some(200),
+            validity_checks: Some(json!({"bcmr_file_accessible": true})),
+        };
+        let authchain_head = json!({"txid":"deadbeef","owner":"bitcoincash:q..."}); 
+
+        let body = build_unified_summary_body(
+            "aa",
+            "1000",
+            12,
+            34,
+            56,
+            Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap(),
+            "main",
+            None,
+            &bcmr,
+            Some(&authchain_head),
+        );
+
+        assert_eq!(body["category"], "aa");
+        assert_eq!(body["name"], "Token");
+        assert_eq!(body["symbol"], "TOK");
+        assert_eq!(body["bcmr"]["registry"]["source_url"], "https://example.com/registry.json");
+        assert_eq!(body["authchain_head"]["txid"], "deadbeef");
+        assert_eq!(body["authchain_head"]["owner"], "bitcoincash:q...");
     }
 }
 

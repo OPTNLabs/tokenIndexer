@@ -31,6 +31,15 @@ curl -sS http://127.0.0.1:8080/health
 curl -sS http://127.0.0.1:8080/metrics
 ```
 
+## Public API
+
+- Public deployment: `https://tokenindex.optnlabs.com`
+- Health check: `https://tokenindex.optnlabs.com/health`
+- Native API base: `https://tokenindex.optnlabs.com/v1`
+- Legacy compatibility base: `https://tokenindex.optnlabs.com/api`
+
+Existing BCMR indexer consumers can switch the base URL from the Python `bcmr-indexer` service to TokenIndex without changing their request paths. Native integrations should prefer the `/v1/...` routes.
+
 ## Docs
 
 - Full blueprint and API contract: [docs/BLUEPRINT.md](docs/BLUEPRINT.md)
@@ -45,8 +54,11 @@ curl -sS http://127.0.0.1:8080/metrics
 - `GET /health`
 - `GET /health/details`
 - `GET /metrics`
+- `GET /v1/token/:category`
 - `GET /v1/token/:category/summary`
 - `GET /v1/bcmr/:category`
+- `GET /v1/token/:category/bcmr`
+- `GET /v1/token/:category/authchain/head`
 - `GET /v1/token/:category/holders/top?n=50`
 - `GET /v1/token/:category/holders?limit=100&cursor=...`
 - `GET /v1/token/:category/holder/:address`
@@ -54,14 +66,32 @@ curl -sS http://127.0.0.1:8080/metrics
 - `GET /v1/token/:category/mempool?n=20`
 - `GET /v1/token/:category/insights`
 
+Legacy BCMR-compatible routes:
+
+- `GET /api/status/latest-block`
+- `GET /api/tokens/:category`
+- `GET /api/registries/:category/latest`
+- `GET /api/registry/:category/identity-snapshot`
+- `GET /api/cashtokens/:category`
+
 All core holder/token endpoints now return unified values in a single response:
 
 - `confirmed_*`
 - `unconfirmed_*`
 - `effective_*` (`confirmed + unconfirmed`)
 
+The native token summary also includes BCMR metadata and authchain provenance when available, so common token lookups can usually stop at one call.
+
+Native response map:
+
+- `GET /v1/token/:category` and `GET /v1/token/:category/summary` return the unified token summary
+- `GET /v1/token/:category/bcmr` returns BCMR metadata only
+- `GET /v1/token/:category/authchain/head` returns provenance only
+- `GET /api/...` remains the compatibility surface for BCMR-style consumers
+
 ## Production Notes
 
+- Production deployment is Docker Compose based and can be rebuilt from a clean Git checkout with `docker compose up -d --build`.
 - Set `TOKENINDEX_CHIPNET_EXPECTED_CHAIN` (e.g. `chip`) to prevent indexing the wrong network.
 - For faster initial catch-up, disable optional workers until near tip:
   - `TOKENINDEX_BCMR_ENABLED=false`

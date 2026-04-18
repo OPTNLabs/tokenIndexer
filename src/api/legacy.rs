@@ -53,6 +53,7 @@ pub struct LegacyCashTokensQuery {
     include_metadata: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, sqlx::FromRow, Clone)]
 struct LegacyRegistryRow {
     registry_id: i64,
@@ -887,7 +888,10 @@ async fn requeue_bcmr_candidates(db: &Database, category: &str) -> anyhow::Resul
     Ok(result.rows_affected())
 }
 
-async fn rpc_for_category(state: &Arc<AppState>, category: &str) -> anyhow::Result<RpcClient> {
+pub(crate) async fn rpc_for_category(
+    state: &Arc<AppState>,
+    category: &str,
+) -> anyhow::Result<RpcClient> {
     let use_fallback = if let Some(fallback) = &state.fallback_db {
         let exists_primary = token_category_exists_in_db(&state.db, category).await?;
         if exists_primary {

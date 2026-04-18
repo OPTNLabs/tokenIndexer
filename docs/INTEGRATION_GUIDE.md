@@ -16,18 +16,52 @@ Authorization: Bearer <token>
 
 1. `GET /health`
 2. `GET /v1/tokens/known?limit=50`
-3. `GET /v1/token/:category/summary`
+3. `GET /v1/token/:category`
 4. `GET /v1/token/:category/holders/top?n=50`
 5. `GET /v1/token/:category/holder/:address`
 6. `GET /v1/address/:address/tokens?limit=100`
-7. Optional metadata: `GET /v1/bcmr/:category`
+7. Optional metadata: `GET /v1/token/:category/bcmr`
+8. Optional provenance: `GET /v1/token/:category/authchain/head`
+
+## 2b. Supported Surface
+
+| Route family | Purpose | Support level |
+| --- | --- | --- |
+| `/v1/token/:category` | Native token summary with BCMR + provenance when available | Primary |
+| `/v1/token/:category/holders*` | Holder balances and eligibility | Primary |
+| `/v1/address/:address/tokens` | Address-centric token inventory | Primary |
+| `/v1/bcmr/:category` | Native BCMR metadata lookup | Primary |
+| `/v1/token/:category/bcmr` | BCMR-only convenience alias | Primary |
+| `/v1/token/:category/authchain/head` | Provenance-only convenience alias | Primary |
+| `/api/bcmr/*` | BCMR compatibility surface for legacy clients | Compatibility |
+| `/api/registry/*` | Registry/identity snapshot compatibility surface | Compatibility |
+| `/api/tokens/*` | Legacy token metadata compatibility surface | Compatibility |
+| `/api/cashtokens/*` | Legacy cashtokens compatibility surface | Compatibility |
+| `/api/status/latest-block` | Legacy status check | Compatibility |
+
+Anything not listed above should be treated as native-only or unsupported unless explicitly documented later.
 
 ## 3. Behaviors to Model Correctly
 
 - Token balances are strings (large integers).
 - Summary includes `confirmed`, `unconfirmed`, and `effective` fields.
+- Token summary also includes BCMR metadata and `authchain_head` when available.
 - Holder responses include confirmed/unconfirmed/effective balance + UTXO fields.
 - Paged holders endpoint uses cursor (`limit` + `cursor`).
+
+### Native summary shape
+
+`GET /v1/token/:category` is the preferred single-call entry point for most token lookups. The response includes:
+
+- token identity fields: `category`, `name`, `symbol`, `chain`
+- balance fields: `total_supply`, `confirmed`, `unconfirmed`, `effective`
+- state fields: `holder_count`, `utxo_count`, `updated_height`, `updated_at`
+- BCMR fields when available: `bcmr.name`, `bcmr.symbol`, `bcmr.description`, `bcmr.decimals`, `bcmr.uris`, `bcmr.registry`
+- provenance fields when available: `authchain_head.txid`, `authchain_head.owner`
+
+If callers need only BCMR metadata, use `GET /v1/token/:category/bcmr`.
+If callers need only provenance, use `GET /v1/token/:category/authchain/head`.
+For legacy BCMR consumers, keep using `/api/...` and switch only the base URL.
 
 ## 4. Minimal cURL Smoke
 
@@ -38,10 +72,13 @@ ADDRESS="<cashaddr_or_other_indexed_address>"
 
 curl -sS "$BASE_URL/health"
 curl -sS "$BASE_URL/v1/tokens/known?limit=10"
+curl -sS "$BASE_URL/v1/token/$CATEGORY"
 curl -sS "$BASE_URL/v1/token/$CATEGORY/summary"
 curl -sS "$BASE_URL/v1/token/$CATEGORY/holders/top?n=5"
 curl -sS "$BASE_URL/v1/token/$CATEGORY/holder/$ADDRESS"
 curl -sS "$BASE_URL/v1/address/$ADDRESS/tokens?limit=25"
+curl -sS "$BASE_URL/v1/token/$CATEGORY/bcmr"
+curl -sS "$BASE_URL/v1/token/$CATEGORY/authchain/head"
 ```
 
 ## 5. JavaScript/TypeScript Client Snippet
@@ -93,5 +130,6 @@ Retry only transient failures (`429`, `500`, network timeout).
 - Health endpoints are green
 - App can load `tokens/known`
 - Summary + holders + address token list render correctly
+- `GET /v1/token/:category` returns BCMR + authchain provenance when available
 - Retry/backoff logic in place
 - Auth behavior tested (if enabled)

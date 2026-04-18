@@ -9,7 +9,14 @@ echo "health"
 curl -fsS "$BASE_URL/health" | jq .
 
 echo "summary"
+curl -fsS "$BASE_URL/v1/token/$CATEGORY" | jq .
 curl -fsS "$BASE_URL/v1/token/$CATEGORY/summary" | jq .
+
+echo "bcmr"
+curl -fsS "$BASE_URL/v1/token/$CATEGORY/bcmr" | jq .
+
+echo "authchain head"
+curl -fsS "$BASE_URL/v1/token/$CATEGORY/authchain/head" | jq .
 
 echo "top holders"
 curl -fsS "$BASE_URL/v1/token/$CATEGORY/holders/top?n=5" | jq .
