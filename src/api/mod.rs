@@ -359,6 +359,7 @@ pub fn build_router(state: Arc<AppState>) -> anyhow::Result<Router> {
         .route("/v1/token/{category}/bcmr", get(routes::bcmr_category))
         .route("/v1/token/{category}/authchain/head", get(legacy::authchain_head))
         .route("/v1/token/{category}/authchain/head/", get(legacy::authchain_head))
+        .route("/v1/token/{category}/nfts", get(routes::token_nfts))
         .route("/v1/token/{category}/holders/top", get(routes::top_holders))
         .route("/v1/token/{category}/holders", get(routes::paged_holders))
         .route("/v1/token/{category}/mempool", get(routes::token_mempool))

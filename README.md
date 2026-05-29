@@ -59,6 +59,7 @@ Existing BCMR indexer consumers can switch the base URL from the Python `bcmr-in
 - `GET /v1/bcmr/:category`
 - `GET /v1/token/:category/bcmr`
 - `GET /v1/token/:category/authchain/head`
+- `GET /v1/token/:category/nfts?limit=100&cursor=...`
 - `GET /v1/token/:category/holders/top?n=50`
 - `GET /v1/token/:category/holders?limit=100&cursor=...`
 - `GET /v1/token/:category/holder/:address`
@@ -85,6 +86,7 @@ The native token summary also includes BCMR metadata and authchain provenance wh
 Native response map:
 
 - `GET /v1/token/:category` and `GET /v1/token/:category/summary` return the unified token summary
+- `GET /v1/token/:category/nfts` returns unspent NFT instances for the category
 - `GET /v1/token/:category/bcmr` returns BCMR metadata only
 - `GET /v1/token/:category/authchain/head` returns provenance only
 - `GET /api/...` remains the compatibility surface for BCMR-style consumers
@@ -98,6 +100,9 @@ Native response map:
   - `TOKENINDEX_BCMR_BACKFILL_ENABLED=false`
   - `TOKENINDEX_MEMPOOL_ENABLED=false`
   - `TOKENINDEX_RECONCILE_ENABLED=false`
+- For reboot resilience, keep the startup wait gate enabled so the container waits for BCHN RPCs before the Rust process starts:
+  - `TOKENINDEX_STARTUP_WAIT_FOR_UPSTREAMS=true`
+  - `TOKENINDEX_STARTUP_WAIT_TIMEOUT_SECS=600`
 - Simultaneous chipnet + mainnet in one process:
   - Primary chipnet stack uses `TOKENINDEX_CHIPNET_*` vars (legacy `TOKENINDEX_*` names still work).
   - Secondary mainnet stack is enabled when `TOKENINDEX_MAINNET_RPC_URL` is set.

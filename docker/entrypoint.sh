@@ -31,6 +31,49 @@ log "feature_flags mempool=${TOKENINDEX_MEMPOOL_ENABLED:-<unset>} bcmr=${TOKENIN
 log "postgres_tuning_apply=${TOKENINDEX_APPLY_POSTGRES_TUNING:-false}"
 log "migrations_dir=$(ls -1 /app/migrations 2>/dev/null | wc -l | tr -d ' ') files"
 
+wait_for_rpc() {
+    label="$1"
+    url="$2"
+    user="$3"
+    pass="$4"
+
+    if [ -z "$url" ] || [ -z "$user" ] || [ -z "$pass" ]; then
+        log "startup wait skipped for ${label} (missing url/user/pass)"
+        return 0
+    fi
+
+    timeout_secs="${TOKENINDEX_STARTUP_WAIT_TIMEOUT_SECS:-600}"
+    interval_secs="${TOKENINDEX_STARTUP_WAIT_INTERVAL_SECS:-5}"
+    deadline=$(( $(date +%s) + timeout_secs ))
+    payload='{"jsonrpc":"1.0","id":"startup","method":"getblockcount","params":[]}'
+
+    log "waiting for ${label} rpc url=${url} timeout=${timeout_secs}s interval=${interval_secs}s"
+    while :; do
+        if curl -fsS --max-time "${TOKENINDEX_STARTUP_WAIT_RPC_TIMEOUT_SECS:-3}" \
+            -u "${user}:${pass}" \
+            -H 'content-type: application/json' \
+            -d "$payload" \
+            "$url" >/dev/null; then
+            log "${label} rpc is reachable"
+            return 0
+        fi
+
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            log "timed out waiting for ${label} rpc url=${url}"
+            exit 1
+        fi
+
+        sleep "$interval_secs"
+    done
+}
+
+if [ "${TOKENINDEX_STARTUP_WAIT_FOR_UPSTREAMS:-true}" = "true" ]; then
+    wait_for_rpc "chipnet" "${TOKENINDEX_RPC_URL:-}" "${TOKENINDEX_RPC_USER:-}" "${TOKENINDEX_RPC_PASS:-}"
+    if [ -n "${TOKENINDEX_MAINNET_RPC_URL:-}" ]; then
+        wait_for_rpc "mainnet" "${TOKENINDEX_MAINNET_RPC_URL:-}" "${TOKENINDEX_MAINNET_RPC_USER:-${TOKENINDEX_RPC_USER:-}}" "${TOKENINDEX_MAINNET_RPC_PASS:-${TOKENINDEX_RPC_PASS:-}}"
+    fi
+fi
+
 if [ "${TOKENINDEX_APPLY_POSTGRES_TUNING:-false}" = "true" ]; then
     if [ -z "${TOKENINDEX_DATABASE_URL:-}" ]; then
         log "TOKENINDEX_APPLY_POSTGRES_TUNING=true but TOKENINDEX_DATABASE_URL is unset"

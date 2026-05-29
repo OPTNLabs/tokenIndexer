@@ -34,9 +34,8 @@
     },
     {
       "name": "IPFS Gateway (public)",
-      "type": "keyword",
-      "url": "https://ipfs.optnlabs.com/ipfs/QmeHA57ny2H2mX29iWLzXdwfjfMHPAKtUVZrJ4Py7kKg5X",
-      "keyword": "bcmr-v2.schema.json",
+      "type": "http",
+      "url": "https://upload.optnlabs.com/healthz",
       "interval": 60,
       "timeout": 48,
       "accepted_statuscodes": ["200-299"]
@@ -83,9 +82,8 @@
     },
     {
       "name": "IPFS Gateway (LAN)",
-      "type": "keyword",
-      "url": "http://192.168.31.108:8080/ipfs/QmeHA57ny2H2mX29iWLzXdwfjfMHPAKtUVZrJ4Py7kKg5X",
-      "keyword": "bcmr-v2.schema.json",
+      "type": "http",
+      "url": "http://192.168.31.108:8787/healthz",
       "interval": 60,
       "timeout": 48,
       "accepted_statuscodes": ["200-299"]
@@ -111,30 +109,26 @@
     },
     {
       "name": "IPFS API (LAN)",
-      "type": "keyword",
-      "url": "http://192.168.31.108:5001/api/v0/version",
-      "method": "POST",
-      "keyword": "\"Version\":",
+      "type": "http",
+      "url": "http://192.168.31.108:8787/healthz",
       "interval": 60,
       "timeout": 48,
       "accepted_statuscodes": ["200-299"]
     },
     {
-      "name": "tokenIndexer - public data",
-      "type": "keyword",
-      "url": "https://tokenindex.optnlabs.com/v1/tokens/known?limit=3",
-      "keyword": "\"tokens\":[",
+      "name": "tokenIndexer - public health",
+      "type": "http",
+      "url": "https://tokenindex.optnlabs.com/health",
       "interval": 60,
-      "timeout": 48,
+      "timeout": 90,
       "accepted_statuscodes": ["200-299"]
     },
     {
       "name": "tokenIndexer - LAN health",
-      "type": "keyword",
+      "type": "http",
       "url": "http://192.168.31.123:8080/health",
-      "keyword": "\"db_ok\":true",
       "interval": 60,
-      "timeout": 48,
+      "timeout": 90,
       "accepted_statuscodes": ["200-299"]
     },
     {

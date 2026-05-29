@@ -14,8 +14,9 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::time::{timeout, Duration};
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::api::cache::{CachedResponse, RedisCacheRecord};
 use crate::api::legacy::rpc_for_category;
@@ -31,6 +32,13 @@ pub struct TopQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct PagedQuery {
+    #[serde(default = "default_page_limit")]
+    limit: i64,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TokenNftQuery {
     #[serde(default = "default_page_limit")]
     limit: i64,
     cursor: Option<String>,
@@ -67,12 +75,29 @@ struct ChainHealthDetails {
     lag_blocks: Option<i64>,
     rpc_ok: bool,
     rpc_error: Option<String>,
+    ingest_blocks_applied: Option<u64>,
+    ingest_last_indexed_height: Option<u64>,
+    ingest_last_known_tip_height: Option<u64>,
+    ingest_last_lag_blocks: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct HolderCursor {
+    #[serde(default)]
     balance: String,
+    #[serde(default)]
+    utxo_count: i32,
+    #[serde(default)]
     locking_bytecode: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenNftCursor {
+    commitment: String,
+    capability: i16,
+    locking_bytecode: String,
+    txid: String,
+    vout: i32,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -94,6 +119,14 @@ struct BcmrCategoryRow {
     claimed_hash_hex: Option<String>,
     request_status: Option<i32>,
     validity_checks: Option<serde_json::Value>,
+}
+
+#[derive(Debug, sqlx::FromRow, Clone)]
+struct HolderEligibilityRow {
+    locking_address: Option<String>,
+    ft_balance: String,
+    utxo_count: i32,
+    updated_height: i32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -186,6 +219,20 @@ struct HolderTokenRow {
     validity_checks: Option<serde_json::Value>,
 }
 
+#[derive(Debug, sqlx::FromRow, Clone)]
+struct TokenNftRow {
+    txid: String,
+    vout: i32,
+    category: String,
+    locking_bytecode: String,
+    locking_address: Option<String>,
+    ft_amount: String,
+    nft_capability: i16,
+    nft_commitment: String,
+    satoshis: i64,
+    updated_height: i32,
+}
+
 impl From<&BcmrCategoryRow> for TokenBcmrMetadata {
     fn from(value: &BcmrCategoryRow) -> Self {
         Self {
@@ -225,6 +272,14 @@ impl From<&TokenSummaryRow> for TokenBcmrMetadata {
             request_status: value.request_status,
             validity_checks: value.validity_checks.clone(),
         }
+    }
+}
+
+fn capability_name(code: i16) -> &'static str {
+    match code {
+        1 => "mutable",
+        2 => "minting",
+        _ => "none",
     }
 }
 
@@ -448,9 +503,42 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 pub async fn health_details(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let primary = inspect_chain_health(&state.db, &state.config).await;
+    let mut primary = inspect_chain_health(&state.db, &state.config).await;
+    primary.ingest_blocks_applied =
+        Some(state.metrics.ingest_blocks_applied.load(Ordering::Relaxed));
+    primary.ingest_last_indexed_height = Some(
+        state
+            .metrics
+            .ingest_last_indexed_height
+            .load(Ordering::Relaxed),
+    );
+    primary.ingest_last_known_tip_height = Some(
+        state
+            .metrics
+            .ingest_last_known_tip_height
+            .load(Ordering::Relaxed),
+    );
+    primary.ingest_last_lag_blocks =
+        Some(state.metrics.ingest_last_lag_blocks.load(Ordering::Relaxed));
     let secondary = if let (Some(db), Some(cfg)) = (&state.fallback_db, &state.fallback_config) {
-        Some(inspect_chain_health(db, cfg).await)
+        let mut health = inspect_chain_health(db, cfg).await;
+        health.ingest_blocks_applied =
+            Some(state.metrics.ingest_blocks_applied.load(Ordering::Relaxed));
+        health.ingest_last_indexed_height = Some(
+            state
+                .metrics
+                .ingest_last_indexed_height
+                .load(Ordering::Relaxed),
+        );
+        health.ingest_last_known_tip_height = Some(
+            state
+                .metrics
+                .ingest_last_known_tip_height
+                .load(Ordering::Relaxed),
+        );
+        health.ingest_last_lag_blocks =
+            Some(state.metrics.ingest_last_lag_blocks.load(Ordering::Relaxed));
+        Some(health)
     } else {
         None
     };
@@ -515,6 +603,10 @@ async fn inspect_chain_health(db: &Database, cfg: &crate::config::Config) -> Cha
         lag_blocks,
         rpc_ok: rpc_error.is_none(),
         rpc_error,
+        ingest_blocks_applied: None,
+        ingest_last_indexed_height: None,
+        ingest_last_known_tip_height: None,
+        ingest_last_lag_blocks: None,
     }
 }
 
@@ -602,12 +694,9 @@ pub async fn token_summary(
             return match row {
                 Ok(Some(row)) => {
                     let bcmr = TokenBcmrMetadata::from(&row);
-                    let authchain_head = authchain_head_for_summary(
-                        &state,
-                        &row.category,
-                        &row.registry_txid_hex,
-                    )
-                    .await;
+                    let authchain_head =
+                        authchain_head_for_summary(&state, &row.category, &row.registry_txid_hex)
+                            .await;
                     let body = build_unified_summary_body(
                         &row.category,
                         &row.total_supply,
@@ -652,12 +741,8 @@ pub async fn token_summary(
     match row {
         Ok(Some(row)) => {
             let bcmr = TokenBcmrMetadata::from(&row);
-            let authchain_head = authchain_head_for_summary(
-                &state,
-                &row.category,
-                &row.registry_txid_hex,
-            )
-            .await;
+            let authchain_head =
+                authchain_head_for_summary(&state, &row.category, &row.registry_txid_hex).await;
             let body = build_unified_summary_body(
                 &row.category,
                 &row.total_supply,
@@ -896,12 +981,18 @@ pub async fn top_holders(
         }
         CacheRead::Stale(stale) => {
             state.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
-            let rows = sqlx::query_as::<_, (String, Option<String>, String, i32, i32)>(
-                queries::TOP_HOLDERS,
+            let rows = run_holders_query(
+                &state,
+                "top holders",
+                &cache_key,
+                state.config.holders_query_timeout_ms,
+                sqlx::query_as::<_, (String, Option<String>, String, i32, i32)>(
+                    queries::TOP_HOLDERS,
+                )
+                .bind(&category)
+                .bind(n)
+                .fetch_all(active_db.pool()),
             )
-            .bind(&category)
-            .bind(n)
-            .fetch_all(active_db.pool())
             .await;
 
             return match rows {
@@ -937,12 +1028,17 @@ pub async fn top_holders(
         }
     }
 
-    let rows =
+    let rows = run_holders_query(
+        &state,
+        "top holders",
+        &cache_key,
+        state.config.holders_query_timeout_ms,
         sqlx::query_as::<_, (String, Option<String>, String, i32, i32)>(queries::TOP_HOLDERS)
             .bind(&category)
             .bind(n)
-            .fetch_all(active_db.pool())
-            .await;
+            .fetch_all(active_db.pool()),
+    )
+    .await;
 
     match rows {
         Ok(rows) => {
@@ -1026,9 +1122,13 @@ pub async fn paged_holders(
         None => None,
     };
 
-    let (cursor_balance, cursor_locking_bytecode) = match decoded_cursor {
-        Some(cursor) => (Some(cursor.balance), Some(cursor.locking_bytecode)),
-        None => (None, None),
+    let (cursor_balance, cursor_utxo_count, cursor_locking_bytecode) = match decoded_cursor {
+        Some(cursor) => (
+            Some(cursor.balance),
+            Some(cursor.utxo_count),
+            Some(cursor.locking_bytecode),
+        ),
+        None => (None, None, None),
     };
 
     match read_cache(&state, &cache_key).await {
@@ -1038,14 +1138,21 @@ pub async fn paged_holders(
         }
         CacheRead::Stale(stale) => {
             state.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
-            let rows = sqlx::query_as::<_, (String, Option<String>, String, i32, i32)>(
-                queries::PAGED_HOLDERS,
+            let rows = run_holders_query(
+                &state,
+                "paged holders",
+                &cache_key,
+                state.config.holders_query_timeout_ms,
+                sqlx::query_as::<_, (String, Option<String>, String, i32, i32)>(
+                    queries::PAGED_HOLDERS,
+                )
+                .bind(&category)
+                .bind(&cursor_balance)
+                .bind(cursor_utxo_count.unwrap_or(0))
+                .bind(&cursor_locking_bytecode)
+                .bind(limit)
+                .fetch_all(active_db.pool()),
             )
-            .bind(&category)
-            .bind(&cursor_balance)
-            .bind(&cursor_locking_bytecode)
-            .bind(limit)
-            .fetch_all(active_db.pool())
             .await;
 
             return match rows {
@@ -1054,6 +1161,7 @@ pub async fn paged_holders(
                     let next_cursor = rows.last().map(|last| {
                         let payload = HolderCursor {
                             balance: last.2.clone(),
+                            utxo_count: last.3,
                             locking_bytecode: last.0.clone(),
                         };
                         base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1090,14 +1198,20 @@ pub async fn paged_holders(
         }
     }
 
-    let rows =
+    let rows = run_holders_query(
+        &state,
+        "paged holders",
+        &cache_key,
+        state.config.holders_query_timeout_ms,
         sqlx::query_as::<_, (String, Option<String>, String, i32, i32)>(queries::PAGED_HOLDERS)
             .bind(&category)
             .bind(&cursor_balance)
+            .bind(cursor_utxo_count.unwrap_or(0))
             .bind(&cursor_locking_bytecode)
             .bind(limit)
-            .fetch_all(active_db.pool())
-            .await;
+            .fetch_all(active_db.pool()),
+    )
+    .await;
 
     match rows {
         Ok(rows) => {
@@ -1105,6 +1219,7 @@ pub async fn paged_holders(
             let next_cursor = rows.last().map(|last| {
                 let payload = HolderCursor {
                     balance: last.2.clone(),
+                    utxo_count: last.3,
                     locking_bytecode: last.0.clone(),
                 };
                 base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1129,6 +1244,218 @@ pub async fn paged_holders(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Failed reading paged holders",
+            )
+        }
+    }
+}
+
+pub async fn token_nfts(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(category): Path<String>,
+    Query(query): Query<TokenNftQuery>,
+) -> Response {
+    state.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
+    if !is_valid_hex_bytes(&category, 32, 32) {
+        return error_json(
+            StatusCode::BAD_REQUEST,
+            "invalid_category",
+            "Category must be 32-byte hex",
+        );
+    }
+    let use_fallback = use_fallback_for_category(&state, &category).await;
+    let active_db = pick_db(&state, use_fallback);
+    let limit = query.limit.clamp(1, 500);
+    let cache_key = format!(
+        "v1:{}:token-nfts:{category}:{limit}:{}",
+        state.config.expected_chain,
+        query.cursor.clone().unwrap_or_default()
+    );
+    let mut _fill_guard: Option<OwnedMutexGuard<()>> = None;
+
+    let decoded_cursor = match query.cursor {
+        Some(value) => {
+            if value.len() > state.config.max_cursor_chars {
+                return error_json(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_cursor",
+                    "Cursor is too large",
+                );
+            }
+            let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(value)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<TokenNftCursor>(&bytes).ok());
+            match decoded {
+                Some(cursor) => Some(cursor),
+                None => {
+                    return error_json(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_cursor",
+                        "Cursor is invalid",
+                    );
+                }
+            }
+        }
+        None => None,
+    };
+
+    match read_cache(&state, &cache_key).await {
+        CacheRead::Fresh(cached) => {
+            state.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+            return cached_to_response(&cached, &headers, false);
+        }
+        CacheRead::Stale(stale) => {
+            state.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+            let rows = sqlx::query_as::<_, TokenNftRow>(queries::TOKEN_NFTS)
+                .bind(&category)
+                .bind(decoded_cursor.as_ref().map(|v| v.commitment.as_str()))
+                .bind(decoded_cursor.as_ref().map(|v| v.capability).unwrap_or(0))
+                .bind(
+                    decoded_cursor
+                        .as_ref()
+                        .map(|v| v.locking_bytecode.as_str())
+                        .unwrap_or(""),
+                )
+                .bind(
+                    decoded_cursor
+                        .as_ref()
+                        .map(|v| v.txid.as_str())
+                        .unwrap_or(""),
+                )
+                .bind(decoded_cursor.as_ref().map(|v| v.vout).unwrap_or(0))
+                .bind(limit)
+                .fetch_all(active_db.pool())
+                .await;
+
+            return match rows {
+                Ok(rows) => {
+                    let updated_height = rows.first().map(|r| r.updated_height).unwrap_or(0);
+                    let next_cursor = rows.last().map(|last| {
+                        let payload = TokenNftCursor {
+                            commitment: last.nft_commitment.clone(),
+                            capability: last.nft_capability,
+                            locking_bytecode: last.locking_bytecode.clone(),
+                            txid: last.txid.clone(),
+                            vout: last.vout,
+                        };
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .encode(serde_json::to_vec(&payload).unwrap_or_default())
+                    });
+
+                    let nfts: Vec<_> = rows
+                        .into_iter()
+                        .map(|row| {
+                            json!({
+                                "txid": row.txid,
+                                "vout": row.vout,
+                                "category": row.category,
+                                "locking_bytecode": row.locking_bytecode,
+                                "locking_address": row.locking_address,
+                                "ft_amount": row.ft_amount,
+                                "nft_capability": capability_name(row.nft_capability),
+                                "nft_commitment": row.nft_commitment,
+                                "satoshis": row.satoshis,
+                                "updated_height": row.updated_height,
+                            })
+                        })
+                        .collect();
+
+                    cache_and_respond(
+                        &state,
+                        &cache_key,
+                        json!({"nfts": nfts, "next_cursor": next_cursor}),
+                        updated_height,
+                        10,
+                        &headers,
+                    )
+                }
+                Err(_) => {
+                    state.metrics.db_errors.fetch_add(1, Ordering::Relaxed);
+                    state.metrics.stale_served.fetch_add(1, Ordering::Relaxed);
+                    cached_to_response(&stale, &headers, true)
+                }
+            };
+        }
+        CacheRead::Miss => {
+            state.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+            _fill_guard = Some(cache_fill_lock(&state, &cache_key).await);
+            if let CacheRead::Fresh(cached) = read_cache(&state, &cache_key).await {
+                state.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+                return cached_to_response(&cached, &headers, false);
+            }
+        }
+    }
+
+    let rows = sqlx::query_as::<_, TokenNftRow>(queries::TOKEN_NFTS)
+        .bind(&category)
+        .bind(decoded_cursor.as_ref().map(|v| v.commitment.as_str()))
+        .bind(decoded_cursor.as_ref().map(|v| v.capability).unwrap_or(0))
+        .bind(
+            decoded_cursor
+                .as_ref()
+                .map(|v| v.locking_bytecode.as_str())
+                .unwrap_or(""),
+        )
+        .bind(
+            decoded_cursor
+                .as_ref()
+                .map(|v| v.txid.as_str())
+                .unwrap_or(""),
+        )
+        .bind(decoded_cursor.as_ref().map(|v| v.vout).unwrap_or(0))
+        .bind(limit)
+        .fetch_all(active_db.pool())
+        .await;
+
+    match rows {
+        Ok(rows) => {
+            let updated_height = rows.first().map(|r| r.updated_height).unwrap_or(0);
+            let next_cursor = rows.last().map(|last| {
+                let payload = TokenNftCursor {
+                    commitment: last.nft_commitment.clone(),
+                    capability: last.nft_capability,
+                    locking_bytecode: last.locking_bytecode.clone(),
+                    txid: last.txid.clone(),
+                    vout: last.vout,
+                };
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&payload).unwrap_or_default())
+            });
+
+            let nfts: Vec<_> = rows
+                .into_iter()
+                .map(|row| {
+                    json!({
+                        "txid": row.txid,
+                        "vout": row.vout,
+                        "category": row.category,
+                        "locking_bytecode": row.locking_bytecode,
+                        "locking_address": row.locking_address,
+                        "ft_amount": row.ft_amount,
+                        "nft_capability": capability_name(row.nft_capability),
+                        "nft_commitment": row.nft_commitment,
+                        "satoshis": row.satoshis,
+                        "updated_height": row.updated_height,
+                    })
+                })
+                .collect();
+
+            cache_and_respond(
+                &state,
+                &cache_key,
+                json!({"nfts": nfts, "next_cursor": next_cursor}),
+                updated_height,
+                10,
+                &headers,
+            )
+        }
+        Err(_) => {
+            state.metrics.db_errors.fetch_add(1, Ordering::Relaxed);
+            error_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Failed reading token NFT list",
             )
         }
     }
@@ -1191,37 +1518,39 @@ pub async fn holder_eligibility(
         }
         CacheRead::Stale(stale) => {
             state.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
-            let row = sqlx::query_as::<_, (Option<String>, String, i32, i32)>(queries::ELIGIBILITY)
+            let row = sqlx::query_as::<_, HolderEligibilityRow>(queries::ELIGIBILITY)
                 .bind(&category)
                 .bind(&address)
                 .fetch_optional(active_db.pool())
                 .await;
 
             return match row {
-                Ok(Some((locking_address, ft_balance, utxo_count, updated_height))) => {
+                Ok(Some(row)) => {
                     let effective_ft =
-                        parse_bigint_str(&ft_balance) + parse_bigint_str(&unconfirmed_ft_delta);
-                    let effective_utxo = (utxo_count + unconfirmed_utxo_delta).max(0);
+                        parse_bigint_str(&row.ft_balance) + parse_bigint_str(&unconfirmed_ft_delta);
+                    let effective_utxo = (row.utxo_count + unconfirmed_utxo_delta).max(0);
+                    let eligible =
+                        effective_ft > num_bigint::BigInt::from(0u8) || effective_utxo > 0;
                     cache_and_respond(
                         &state,
                         &cache_key,
                         json!({
-                            "eligible": effective_ft > num_bigint::BigInt::from(0u8),
-                            "confirmed_eligible": ft_balance != "0",
-                            "effective_eligible": effective_ft > num_bigint::BigInt::from(0u8),
-                            "address": locking_address.clone().or(unconfirmed_address.clone()),
-                            "locking_address": locking_address.or(unconfirmed_address.clone()),
+                            "eligible": eligible,
+                            "confirmed_eligible": row.ft_balance != "0" || row.utxo_count > 0,
+                            "effective_eligible": eligible,
+                            "address": row.locking_address.clone().or(unconfirmed_address.clone()),
+                            "locking_address": row.locking_address.or(unconfirmed_address.clone()),
                             "ft_balance": effective_ft.to_string(),
                             "utxo_count": effective_utxo,
-                            "confirmed_ft_balance": ft_balance,
+                            "confirmed_ft_balance": row.ft_balance,
                             "unconfirmed_ft_delta": unconfirmed_ft_delta,
                             "effective_ft_balance": effective_ft.to_string(),
-                            "confirmed_utxo_count": utxo_count,
+                            "confirmed_utxo_count": row.utxo_count,
                             "unconfirmed_utxo_delta": unconfirmed_utxo_delta,
                             "effective_utxo_count": effective_utxo,
-                            "updated_height": updated_height,
+                            "updated_height": row.updated_height,
                         }),
-                        updated_height,
+                        row.updated_height,
                         5,
                         &headers,
                     )
@@ -1230,9 +1559,11 @@ pub async fn holder_eligibility(
                     &state,
                     &cache_key,
                     json!({
-                        "eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8),
+                        "eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8)
+                            || unconfirmed_utxo_delta > 0,
                         "confirmed_eligible": false,
-                        "effective_eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8),
+                        "effective_eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8)
+                            || unconfirmed_utxo_delta > 0,
                         "address": unconfirmed_address.clone(),
                         "locking_address": unconfirmed_address.clone(),
                         "ft_balance": unconfirmed_ft_delta.clone(),
@@ -1266,37 +1597,38 @@ pub async fn holder_eligibility(
         }
     }
 
-    let row = sqlx::query_as::<_, (Option<String>, String, i32, i32)>(queries::ELIGIBILITY)
+    let row = sqlx::query_as::<_, HolderEligibilityRow>(queries::ELIGIBILITY)
         .bind(&category)
         .bind(&address)
         .fetch_optional(active_db.pool())
         .await;
 
     match row {
-        Ok(Some((locking_address, ft_balance, utxo_count, updated_height))) => {
+        Ok(Some(row)) => {
             let effective_ft =
-                parse_bigint_str(&ft_balance) + parse_bigint_str(&unconfirmed_ft_delta);
-            let effective_utxo = (utxo_count + unconfirmed_utxo_delta).max(0);
+                parse_bigint_str(&row.ft_balance) + parse_bigint_str(&unconfirmed_ft_delta);
+            let effective_utxo = (row.utxo_count + unconfirmed_utxo_delta).max(0);
+            let eligible = effective_ft > num_bigint::BigInt::from(0u8) || effective_utxo > 0;
             cache_and_respond(
                 &state,
                 &cache_key,
                 json!({
-                    "eligible": effective_ft > num_bigint::BigInt::from(0u8),
-                    "confirmed_eligible": ft_balance != "0",
-                    "effective_eligible": effective_ft > num_bigint::BigInt::from(0u8),
-                    "address": locking_address.clone().or(unconfirmed_address.clone()),
-                    "locking_address": locking_address.or(unconfirmed_address),
+                    "eligible": eligible,
+                    "confirmed_eligible": row.ft_balance != "0" || row.utxo_count > 0,
+                    "effective_eligible": eligible,
+                    "address": row.locking_address.clone().or(unconfirmed_address.clone()),
+                    "locking_address": row.locking_address.or(unconfirmed_address),
                     "ft_balance": effective_ft.to_string(),
                     "utxo_count": effective_utxo,
-                    "confirmed_ft_balance": ft_balance,
+                    "confirmed_ft_balance": row.ft_balance,
                     "unconfirmed_ft_delta": unconfirmed_ft_delta,
                     "effective_ft_balance": effective_ft.to_string(),
-                    "confirmed_utxo_count": utxo_count,
+                    "confirmed_utxo_count": row.utxo_count,
                     "unconfirmed_utxo_delta": unconfirmed_utxo_delta,
                     "effective_utxo_count": effective_utxo,
-                    "updated_height": updated_height,
+                    "updated_height": row.updated_height,
                 }),
-                updated_height,
+                row.updated_height,
                 5,
                 &headers,
             )
@@ -1305,9 +1637,11 @@ pub async fn holder_eligibility(
             &state,
             &cache_key,
             json!({
-                "eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8),
+                "eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8)
+                    || unconfirmed_utxo_delta > 0,
                 "confirmed_eligible": false,
-                "effective_eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8),
+                "effective_eligible": parse_bigint_str(&unconfirmed_ft_delta) > num_bigint::BigInt::from(0u8)
+                    || unconfirmed_utxo_delta > 0,
                 "address": unconfirmed_address.clone(),
                 "locking_address": unconfirmed_address,
                 "ft_balance": unconfirmed_ft_delta.clone(),
@@ -1972,6 +2306,53 @@ async fn cache_fill_lock(state: &Arc<AppState>, cache_key: &str) -> OwnedMutexGu
     lock.lock_owned().await
 }
 
+async fn run_holders_query<F, T>(
+    state: &Arc<AppState>,
+    route: &'static str,
+    cache_key: &str,
+    timeout_ms: u64,
+    fut: F,
+) -> Result<Vec<T>, sqlx::Error>
+where
+    F: std::future::Future<Output = Result<Vec<T>, sqlx::Error>> + Send,
+    T: Send,
+{
+    let started = Instant::now();
+    match timeout(Duration::from_millis(timeout_ms), fut).await {
+        Ok(Ok(rows)) => {
+            info!(
+                route,
+                cache_key = %cache_key,
+                row_count = rows.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "holders query completed"
+            );
+            Ok(rows)
+        }
+        Ok(Err(err)) => {
+            warn!(
+                route,
+                cache_key = %cache_key,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                error = ?err,
+                "holders query failed"
+            );
+            Err(err)
+        }
+        Err(_) => {
+            state.metrics.db_errors.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                route,
+                cache_key = %cache_key,
+                timeout_ms,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "holders query timed out"
+            );
+            Err(sqlx::Error::PoolTimedOut)
+        }
+    }
+}
+
 fn cache_and_respond(
     state: &Arc<AppState>,
     cache_key: &str,
@@ -2210,7 +2591,10 @@ async fn authchain_head_for_summary(
     let txid = registry_txid_hex.as_deref()?;
     let rpc = rpc_for_category(state, category).await.ok()?;
 
-    let tx: Value = rpc.call("getrawtransaction", json!([txid, true])).await.ok()?;
+    let tx: Value = rpc
+        .call("getrawtransaction", json!([txid, true]))
+        .await
+        .ok()?;
     let owner = tx
         .get("vout")
         .and_then(|v| v.as_array())
@@ -2297,7 +2681,7 @@ mod tests {
             request_status: Some(200),
             validity_checks: Some(json!({"bcmr_file_accessible": true})),
         };
-        let authchain_head = json!({"txid":"deadbeef","owner":"bitcoincash:q..."}); 
+        let authchain_head = json!({"txid":"deadbeef","owner":"bitcoincash:q..."});
 
         let body = build_unified_summary_body(
             "aa",
@@ -2315,7 +2699,10 @@ mod tests {
         assert_eq!(body["category"], "aa");
         assert_eq!(body["name"], "Token");
         assert_eq!(body["symbol"], "TOK");
-        assert_eq!(body["bcmr"]["registry"]["source_url"], "https://example.com/registry.json");
+        assert_eq!(
+            body["bcmr"]["registry"]["source_url"],
+            "https://example.com/registry.json"
+        );
         assert_eq!(body["authchain_head"]["txid"], "deadbeef");
         assert_eq!(body["authchain_head"]["owner"], "bitcoincash:q...");
     }

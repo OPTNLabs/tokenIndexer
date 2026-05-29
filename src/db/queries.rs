@@ -41,8 +41,8 @@ SELECT
   updated_height
 FROM token_holders
 WHERE category = decode($1, 'hex')
-  AND ft_balance > 0
-ORDER BY ft_balance DESC, locking_bytecode ASC
+  AND (ft_balance > 0 OR utxo_count > 0)
+ORDER BY ft_balance DESC, utxo_count DESC, locking_bytecode ASC
 LIMIT $2
 "#;
 
@@ -58,11 +58,67 @@ WHERE category = decode($1, 'hex')
   AND (
     $2::numeric IS NULL
     OR ft_balance < $2::numeric
-    OR (ft_balance = $2::numeric AND locking_bytecode > decode($3, 'hex'))
+    OR (ft_balance = $2::numeric AND utxo_count < $3)
+    OR (
+      ft_balance = $2::numeric
+      AND utxo_count = $3
+      AND locking_bytecode > decode($4, 'hex')
+    )
   )
-  AND ft_balance > 0
-ORDER BY ft_balance DESC, locking_bytecode ASC
-LIMIT $4
+  AND (ft_balance > 0 OR utxo_count > 0)
+ORDER BY ft_balance DESC, utxo_count DESC, locking_bytecode ASC
+LIMIT $5
+"#;
+
+pub const TOKEN_NFTS: &str = r#"
+SELECT
+  encode(txid, 'hex') AS txid,
+  vout,
+  encode(category, 'hex') AS category,
+  encode(locking_bytecode, 'hex') AS locking_bytecode,
+  locking_address,
+  COALESCE(ft_amount, 0)::text AS ft_amount,
+  nft_capability,
+  COALESCE(encode(nft_commitment, 'hex'), '') AS nft_commitment,
+  satoshis,
+  created_height AS updated_height
+FROM token_outpoints
+WHERE category = decode($1, 'hex')
+  AND spent_height IS NULL
+  AND nft_capability IS NOT NULL
+  AND (
+    $2::text IS NULL
+    OR COALESCE(encode(nft_commitment, 'hex'), '') > $2
+    OR (
+      COALESCE(encode(nft_commitment, 'hex'), '') = $2
+      AND nft_capability > $3
+    )
+    OR (
+      COALESCE(encode(nft_commitment, 'hex'), '') = $2
+      AND nft_capability = $3
+      AND encode(locking_bytecode, 'hex') > $4
+    )
+    OR (
+      COALESCE(encode(nft_commitment, 'hex'), '') = $2
+      AND nft_capability = $3
+      AND encode(locking_bytecode, 'hex') = $4
+      AND encode(txid, 'hex') > $5
+    )
+    OR (
+      COALESCE(encode(nft_commitment, 'hex'), '') = $2
+      AND nft_capability = $3
+      AND encode(locking_bytecode, 'hex') = $4
+      AND encode(txid, 'hex') = $5
+      AND vout > $6
+    )
+  )
+ORDER BY
+  COALESCE(encode(nft_commitment, 'hex'), '') ASC,
+  nft_capability ASC,
+  encode(locking_bytecode, 'hex') ASC,
+  encode(txid, 'hex') ASC,
+  vout ASC
+LIMIT $7
 "#;
 
 pub const ELIGIBILITY: &str = r#"

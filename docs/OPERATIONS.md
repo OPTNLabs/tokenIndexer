@@ -52,6 +52,10 @@ Useful ingest-specific `/metrics` series:
 
 - `TOKENINDEX_RPC_BATCH_SIZE`: block/hash fetch batch size
 - `TOKENINDEX_RPC_PREFETCH_BATCHES`: number of block batches fetched ahead of the writer
+- `TOKENINDEX_MAINNET_RPC_TIMEOUT_MS`: optional mainnet-only RPC timeout override
+- `TOKENINDEX_MAINNET_RPC_RETRIES`: optional mainnet-only RPC retry override
+- `TOKENINDEX_MAINNET_RPC_BATCH_SIZE`: optional mainnet-only batch size override
+- `TOKENINDEX_MAINNET_RPC_PREFETCH_BATCHES`: optional mainnet-only prefetch depth override
 - `TOKENINDEX_DB_INGEST_SYNCHRONOUS_COMMIT`: ingest durability mode (`off` is faster, less durable)
 - `TOKENINDEX_CONSISTENCY_CHECK_INTERVAL`: full drift check cadence
 - `TOKENINDEX_MEMPOOL_ENABLED`: disable during bootstrap if ingest lag matters more than mempool freshness
@@ -249,6 +253,17 @@ Expected TokenIndex behavior:
 3. Let automatic SQL migrations run on startup
 4. Confirm `/health`, `/metrics`, `/v1/token/*`, `/v1/bcmr/*`, and legacy `/api/*` BCMR routes
 5. Monitor reorg/log errors for first 15 minutes
+
+## Reboot/Recovery Notes
+
+- The container now waits for configured BCHN RPC upstreams before starting the Rust process.
+- Keep `TOKENINDEX_STARTUP_WAIT_FOR_UPSTREAMS=true` for reboot windows so `tokenindex` does not come up ahead of chipnet/mainnet RPC.
+- If mainnet is still catching up or is in IBD, lower `TOKENINDEX_MAINNET_RPC_BATCH_SIZE` and `TOKENINDEX_MAINNET_RPC_PREFETCH_BATCHES` before restarting `tokenindex`.
+- For mainnet catch-up, set `TOKENINDEX_MAINNET_DB_INGEST_SYNCHRONOUS_COMMIT=off` to reduce fsync pressure on the ingest transaction path.
+- If the mainnet ingest loop is canceling on `statement_timeout`, raise `TOKENINDEX_MAINNET_DB_STATEMENT_TIMEOUT_MS` above the slowest observed spend-update latency; 120s is a reasonable catch-up starting point on the current live mainnet table.
+- If `/health` is `degraded` after a reboot, check the upstream RPCs and Postgres first before cycling the app again.
+- If the public endpoint is healthy but slow, keep Kuma's timeout above the observed startup/catch-up window.
+- Holders routes now use a bounded query timeout (`TOKENINDEX_HOLDERS_QUERY_TIMEOUT_MS`) so client imports fail fast instead of hanging through DB recovery windows.
 
 ## Release and Rollback
 

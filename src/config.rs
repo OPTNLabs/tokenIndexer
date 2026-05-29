@@ -26,6 +26,9 @@ pub struct Config {
     #[arg(long, env = "TOKENINDEX_MAINNET_DB_SCHEMA")]
     pub mainnet_db_schema: Option<String>,
 
+    #[arg(long, env = "TOKENINDEX_MAINNET_DB_STATEMENT_TIMEOUT_MS")]
+    pub mainnet_db_statement_timeout_ms: Option<u64>,
+
     #[arg(
         long,
         env = "TOKENINDEX_DATABASE_URL",
@@ -86,6 +89,21 @@ pub struct Config {
 
     #[arg(long, env = "TOKENINDEX_MAINNET_BOOTSTRAP_HEIGHT")]
     pub mainnet_bootstrap_height: Option<i32>,
+
+    #[arg(long, env = "TOKENINDEX_MAINNET_RPC_TIMEOUT_MS")]
+    pub mainnet_rpc_timeout_ms: Option<u64>,
+
+    #[arg(long, env = "TOKENINDEX_MAINNET_RPC_RETRIES")]
+    pub mainnet_rpc_retries: Option<u32>,
+
+    #[arg(long, env = "TOKENINDEX_MAINNET_RPC_BATCH_SIZE")]
+    pub mainnet_rpc_batch_size: Option<usize>,
+
+    #[arg(long, env = "TOKENINDEX_MAINNET_RPC_PREFETCH_BATCHES")]
+    pub mainnet_rpc_prefetch_batches: Option<usize>,
+
+    #[arg(long, env = "TOKENINDEX_MAINNET_DB_INGEST_SYNCHRONOUS_COMMIT")]
+    pub mainnet_db_ingest_synchronous_commit: Option<String>,
 
     #[arg(long, env = "TOKENINDEX_EXPECTED_CHAIN", default_value = "chip")]
     pub expected_chain: String,
@@ -264,6 +282,13 @@ pub struct Config {
 
     #[arg(
         long,
+        env = "TOKENINDEX_HOLDERS_QUERY_TIMEOUT_MS",
+        default_value_t = 12_000
+    )]
+    pub holders_query_timeout_ms: u64,
+
+    #[arg(
+        long,
         env = "TOKENINDEX_CORS_ALLOW_ORIGINS",
         value_delimiter = ',',
         default_value = "*"
@@ -334,6 +359,9 @@ impl Config {
             .mainnet_db_schema
             .clone()
             .unwrap_or_else(|| "mainnet".to_string());
+        cfg.db_statement_timeout_ms = self
+            .mainnet_db_statement_timeout_ms
+            .unwrap_or(self.db_statement_timeout_ms);
         cfg.rpc_url = rpc_url;
         cfg.rpc_user = self
             .mainnet_rpc_user
@@ -346,6 +374,16 @@ impl Config {
         cfg.bootstrap_height = self
             .mainnet_bootstrap_height
             .unwrap_or(self.bootstrap_height);
+        cfg.rpc_timeout_ms = self.mainnet_rpc_timeout_ms.unwrap_or(self.rpc_timeout_ms);
+        cfg.rpc_retries = self.mainnet_rpc_retries.unwrap_or(self.rpc_retries);
+        cfg.rpc_batch_size = self.mainnet_rpc_batch_size.unwrap_or(self.rpc_batch_size);
+        cfg.rpc_prefetch_batches = self
+            .mainnet_rpc_prefetch_batches
+            .unwrap_or(self.rpc_prefetch_batches);
+        cfg.db_ingest_synchronous_commit = self
+            .mainnet_db_ingest_synchronous_commit
+            .clone()
+            .unwrap_or_else(|| self.db_ingest_synchronous_commit.clone());
         cfg.expected_chain = "main".to_string();
         Ok(Some(cfg))
     }

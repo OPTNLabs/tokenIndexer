@@ -115,10 +115,7 @@ pub async fn latest_block(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-pub async fn token(
-    State(state): State<Arc<AppState>>,
-    Path(category): Path<String>,
-) -> Response {
+pub async fn token(State(state): State<Arc<AppState>>, Path(category): Path<String>) -> Response {
     legacy_token_response(state, category, None).await
 }
 
@@ -185,7 +182,10 @@ pub async fn bcmr_contents(
 ) -> Response {
     match fetch_registry_by_category(&state, &category).await {
         Ok(Some(row)) => Json(row.contents.unwrap_or(Value::Null)).into_response(),
-        Ok(None) => json_error(StatusCode::NOT_FOUND, json!({ "error": "Registry not found" })),
+        Ok(None) => json_error(
+            StatusCode::NOT_FOUND,
+            json!({ "error": "Registry not found" }),
+        ),
         Err(err) => internal_error(err),
     }
 }
@@ -196,14 +196,17 @@ pub async fn bcmr_token(
 ) -> Response {
     match fetch_registry_by_category(&state, &category).await {
         Ok(Some(row)) => {
-            let token = identity_snapshot_for_row(&row)
-                .and_then(|snapshot| snapshot.get("token").cloned());
+            let token =
+                identity_snapshot_for_row(&row).and_then(|snapshot| snapshot.get("token").cloned());
             match token {
                 Some(token) => Json(token).into_response(),
                 None => json_error(StatusCode::NOT_FOUND, json!({ "error": "Token not found" })),
             }
         }
-        Ok(None) => json_error(StatusCode::NOT_FOUND, json!({ "error": "Registry not found" })),
+        Ok(None) => json_error(
+            StatusCode::NOT_FOUND,
+            json!({ "error": "Registry not found" }),
+        ),
         Err(err) => internal_error(err),
     }
 }
@@ -223,7 +226,10 @@ pub async fn bcmr_token_nft(
                 ),
             }
         }
-        Ok(None) => json_error(StatusCode::NOT_FOUND, json!({ "error": "Category not found" })),
+        Ok(None) => json_error(
+            StatusCode::NOT_FOUND,
+            json!({ "error": "Category not found" }),
+        ),
         Err(err) => internal_error(err),
     }
 }
@@ -234,14 +240,17 @@ pub async fn bcmr_uris(
 ) -> Response {
     match fetch_registry_by_category(&state, &category).await {
         Ok(Some(row)) => {
-            let uris = identity_snapshot_for_row(&row)
-                .and_then(|snapshot| snapshot.get("uris").cloned());
+            let uris =
+                identity_snapshot_for_row(&row).and_then(|snapshot| snapshot.get("uris").cloned());
             match uris {
                 Some(uris) => Json(uris).into_response(),
                 None => json_error(StatusCode::NOT_FOUND, json!({ "error": "Uris not found" })),
             }
         }
-        Ok(None) => json_error(StatusCode::NOT_FOUND, json!({ "error": "Registry not found" })),
+        Ok(None) => json_error(
+            StatusCode::NOT_FOUND,
+            json!({ "error": "Registry not found" }),
+        ),
         Err(err) => internal_error(err),
     }
 }
@@ -256,10 +265,16 @@ pub async fn bcmr_icon_uri(
                 .and_then(|snapshot| snapshot.get("uris").and_then(|v| v.get("icon")).cloned());
             match icon {
                 Some(icon) => Json(icon).into_response(),
-                None => json_error(StatusCode::NOT_FOUND, json!({ "error": "Icon uri not found" })),
+                None => json_error(
+                    StatusCode::NOT_FOUND,
+                    json!({ "error": "Icon uri not found" }),
+                ),
             }
         }
-        Ok(None) => json_error(StatusCode::NOT_FOUND, json!({ "error": "Registry not found" })),
+        Ok(None) => json_error(
+            StatusCode::NOT_FOUND,
+            json!({ "error": "Registry not found" }),
+        ),
         Err(err) => internal_error(err),
     }
 }
@@ -270,7 +285,10 @@ pub async fn bcmr_published_url(
 ) -> Response {
     match fetch_registry_by_category(&state, &category).await {
         Ok(Some(row)) => Json(json!({ "url": row.source_url })).into_response(),
-        Ok(None) => json_error(StatusCode::NOT_FOUND, json!({ "error": "Category not found" })),
+        Ok(None) => json_error(
+            StatusCode::NOT_FOUND,
+            json!({ "error": "Category not found" }),
+        ),
         Err(err) => internal_error(err),
     }
 }
@@ -320,8 +338,11 @@ pub async fn authchain_head(
         .and_then(|arr| arr.first())
         .and_then(|vout| vout.get("scriptPubKey"))
         .and_then(|spk| {
-            spk.get("address")
-                .or_else(|| spk.get("addresses").and_then(|v| v.as_array()).and_then(|a| a.first()))
+            spk.get("address").or_else(|| {
+                spk.get("addresses")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+            })
         })
         .cloned()
         .unwrap_or(Value::Null);
@@ -396,7 +417,9 @@ pub async fn registry_nfts(
             let nfts = identity_snapshot_for_row(&row)
                 .and_then(|snapshot| snapshot.get("token").and_then(|v| v.get("nfts")).cloned());
             match nfts {
-                Some(nfts) => Json(json!({ "nfts": nfts, "_meta": registry_meta(&row) })).into_response(),
+                Some(nfts) => {
+                    Json(json!({ "nfts": nfts, "_meta": registry_meta(&row) })).into_response()
+                }
                 None => Json(Value::Null).into_response(),
             }
         }
@@ -411,17 +434,19 @@ pub async fn registry_parse_bytecode(
 ) -> Response {
     match fetch_registry_by_category(&state, &category).await {
         Ok(Some(row)) => {
-            let bytecode = identity_snapshot_for_row(&row)
-                .and_then(|snapshot| {
-                    snapshot
-                        .get("token")
-                        .and_then(|v| v.get("nfts"))
-                        .and_then(|v| v.get("parse"))
-                        .and_then(|v| v.get("bytecode"))
-                        .cloned()
-                });
+            let bytecode = identity_snapshot_for_row(&row).and_then(|snapshot| {
+                snapshot
+                    .get("token")
+                    .and_then(|v| v.get("nfts"))
+                    .and_then(|v| v.get("parse"))
+                    .and_then(|v| v.get("bytecode"))
+                    .cloned()
+            });
             match bytecode {
-                Some(bytecode) => Json(json!({ "bytecode": bytecode, "_meta": registry_meta(&row) })).into_response(),
+                Some(bytecode) => {
+                    Json(json!({ "bytecode": bytecode, "_meta": registry_meta(&row) }))
+                        .into_response()
+                }
                 None => Json(Value::Null).into_response(),
             }
         }
@@ -446,7 +471,11 @@ pub async fn registry_nft_types(
             let paginated = is_true(query.paginated.as_deref());
             if paginated {
                 let end = (offset + limit).min(keys.len());
-                let slice = if offset < keys.len() { &keys[offset..end] } else { &[] };
+                let slice = if offset < keys.len() {
+                    &keys[offset..end]
+                } else {
+                    &[]
+                };
                 let results: Vec<Value> = slice
                     .iter()
                     .map(|commitment| {
@@ -551,7 +580,11 @@ pub async fn cashtokens(
     let total = rows.len();
     let start = (page - 1) * page_size;
     let end = (start + page_size).min(total);
-    let page_rows = if start < total { &rows[start..end] } else { &[] };
+    let page_rows = if start < total {
+        &rows[start..end]
+    } else {
+        &[]
+    };
     let include_metadata = is_true(query.include_metadata.as_deref());
 
     let mut results = Vec::with_capacity(page_rows.len());
@@ -572,12 +605,22 @@ pub async fn cashtokens(
 
     let base = strip_query_from_uri(&uri);
     let next = if end < total {
-        Some(page_link(&base, page + 1, query.include_metadata.as_deref(), &capability_filters))
+        Some(page_link(
+            &base,
+            page + 1,
+            query.include_metadata.as_deref(),
+            &capability_filters,
+        ))
     } else {
         None
     };
     let previous = if page > 1 {
-        Some(page_link(&base, page - 1, query.include_metadata.as_deref(), &capability_filters))
+        Some(page_link(
+            &base,
+            page - 1,
+            query.include_metadata.as_deref(),
+            &capability_filters,
+        ))
     } else {
         None
     };
@@ -603,7 +646,10 @@ async fn legacy_token_response(
     };
 
     if !exists {
-        return json_error(StatusCode::NOT_FOUND, json!({ "error": "category not found" }));
+        return json_error(
+            StatusCode::NOT_FOUND,
+            json!({ "error": "category not found" }),
+        );
     }
 
     let registry = match fetch_registry_by_category(&state, &category).await {
@@ -632,7 +678,12 @@ async fn legacy_token_response(
         .and_then(|token| token.get("nfts"))
         .is_some();
 
-    Json(transform_to_legacy_token_payload(snapshot, type_key.as_deref(), is_nft)).into_response()
+    Json(transform_to_legacy_token_payload(
+        snapshot,
+        type_key.as_deref(),
+        is_nft,
+    ))
+    .into_response()
 }
 
 async fn token_category_exists(state: &Arc<AppState>, category: &str) -> anyhow::Result<bool> {
@@ -864,7 +915,11 @@ async fn build_cash_token_metadata(state: &Arc<AppState>, row: &LegacyCashTokenR
         None => Value::Null,
     };
     let mut metadata = Map::new();
-    if row.capability.and_then(capability_name).is_some_and(|v| v != "none") {
+    if row
+        .capability
+        .and_then(capability_name)
+        .is_some_and(|v| v != "none")
+    {
         metadata.insert("nft".to_string(), nft);
     }
     metadata.insert("token".to_string(), token);
@@ -925,7 +980,16 @@ fn build_registry_summary(row: &LegacyRegistryRow, include_identities: bool) -> 
     if let Some(schema) = contents.get("$schema").cloned() {
         out.insert("$schema".to_string(), schema);
     }
-    for key in ["version", "latestRevision", "registryIdentity", "tags", "license", "locales", "extensions", "chains"] {
+    for key in [
+        "version",
+        "latestRevision",
+        "registryIdentity",
+        "tags",
+        "license",
+        "locales",
+        "extensions",
+        "chains",
+    ] {
         if let Some(value) = contents.get(key).cloned() {
             out.insert(key.to_string(), value);
         }
@@ -1059,7 +1123,10 @@ fn transform_to_legacy_token_payload(
             .cloned()
         {
             if let Some(obj) = snapshot.as_object_mut() {
-                obj.insert("type_metadata".to_string(), normalize_type_metadata(type_metadata));
+                obj.insert(
+                    "type_metadata".to_string(),
+                    normalize_type_metadata(type_metadata),
+                );
             }
         }
     }
@@ -1084,7 +1151,10 @@ fn normalize_type_metadata(mut metadata: Value) -> Value {
         if !uris.contains_key("image") {
             if let Some(asset) = uris.get("asset").and_then(Value::as_str) {
                 let lower = asset.to_ascii_lowercase();
-                if [".jpg", ".png", ".gif", ".svg"].iter().any(|ext| lower.ends_with(ext)) {
+                if [".jpg", ".png", ".gif", ".svg"]
+                    .iter()
+                    .any(|ext| lower.ends_with(ext))
+                {
                     uris.insert("image".to_string(), Value::String(asset.to_string()));
                 }
             }
@@ -1099,7 +1169,9 @@ fn normalize_type_metadata(mut metadata: Value) -> Value {
 }
 
 fn nft_types_map(row: &LegacyRegistryRow) -> Option<Map<String, Value>> {
-    row.nft_types.clone().and_then(|value| value.as_object().cloned())
+    row.nft_types
+        .clone()
+        .and_then(|value| value.as_object().cloned())
 }
 
 fn nft_type_from_row(row: &LegacyRegistryRow, commitment: &str) -> Option<Value> {
@@ -1142,7 +1214,12 @@ fn strip_query_from_uri(uri: &axum::http::Uri) -> String {
     uri.path().to_string()
 }
 
-fn page_link(base: &str, page: usize, include_metadata: Option<&str>, capability: &[String]) -> String {
+fn page_link(
+    base: &str,
+    page: usize,
+    include_metadata: Option<&str>,
+    capability: &[String],
+) -> String {
     let mut params = vec![format!("page={page}")];
     if is_true(include_metadata) {
         params.push("include_metadata=true".to_string());

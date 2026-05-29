@@ -13,7 +13,7 @@
 - Maintains `chain_state` and `applied_blocks` for restart + rollback
 
 2. **REST API** (multi-reader)
-- Axum JSON endpoints for token summary, top holders, paged holders, eligibility, holder tokens, and BCMR category metadata
+- Axum JSON endpoints for token summary, top holders, paged holders, NFT listings, eligibility, holder tokens, and BCMR category metadata
 - Small payloads, string balances, keyset pagination
 - Cache-first reads with ETag + `Cache-Control`
 
@@ -206,7 +206,34 @@ Response:
 }
 ```
 
-### 5. `GET /v1/address/:address/tokens`
+### 5. `GET /v1/token/:category/nfts?limit=100&cursor=...`
+
+- Returns one row per unspent NFT UTXO in the category
+- Stable keyset order: `nft_commitment ASC, nft_capability ASC, locking_bytecode ASC, txid ASC, vout ASC`
+- Cursor payload: base64url JSON with the last row’s commitment, capability, locking bytecode, txid, and vout
+
+Response:
+```json
+{
+  "nfts": [
+    {
+      "txid": "<hex>",
+      "vout": 1,
+      "category": "<hex>",
+      "locking_bytecode": "<hex>",
+      "locking_address": "<address>",
+      "ft_amount": "0",
+      "nft_capability": "none",
+      "nft_commitment": "<hex>",
+      "satoshis": 1000,
+      "updated_height": 850123
+    }
+  ],
+  "next_cursor": "eyJjb21taXRtZW50IjoiLi4uIiwiY2FwYWJpbGl0eSI6MCwibG9ja2luZ19ieXRlY29kZSI6Ii4uLiIsInR4aWQiOiIuLi4iLCJ2b3V0IjoxfQ"
+}
+```
+
+### 6. `GET /v1/address/:address/tokens`
 
 Response:
 ```json
@@ -222,7 +249,7 @@ Response:
 }
 ```
 
-### 6. `GET /v1/bcmr/:category`
+### 7. `GET /v1/bcmr/:category`
 
 Response:
 ```json
