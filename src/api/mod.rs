@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod docs;
 pub mod legacy;
 pub mod ratelimit;
 pub mod routes;
@@ -352,6 +353,15 @@ pub fn build_router(state: Arc<AppState>) -> anyhow::Result<Router> {
         .route("/health", get(routes::health))
         .route("/health/details", get(routes::health_details))
         .route("/metrics", get(routes::metrics))
+        .route("/openapi.json", get(docs::openapi_json))
+        .route("/docs", get(docs::swagger_ui))
+        .route("/swagger-ui", get(docs::swagger_ui))
+        .route("/swagger-ui/", get(docs::swagger_ui))
+        .route("/swagger-ui-assets/swagger-ui.css", get(docs::swagger_ui_css))
+        .route(
+            "/swagger-ui-assets/swagger-ui-bundle.js",
+            get(docs::swagger_ui_bundle_js),
+        )
         .route("/v1/tokens/known", get(routes::known_tokens))
         .route("/v1/token/{category}", get(routes::token_summary))
         .route("/v1/token/{category}/summary", get(routes::token_summary))

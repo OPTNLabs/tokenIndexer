@@ -37,59 +37,38 @@ curl -sS http://127.0.0.1:8080/metrics
 - Health check: `https://tokenindex.optnlabs.com/health`
 - Native API base: `https://tokenindex.optnlabs.com/v1`
 - Legacy compatibility base: `https://tokenindex.optnlabs.com/api`
+- Swagger UI: `https://tokenindex.optnlabs.com/docs`
+- OpenAPI JSON: `https://tokenindex.optnlabs.com/openapi.json`
+- Canonical route index: [docs/BLUEPRINT.md](docs/BLUEPRINT.md)
+- Integration patterns: [docs/INTEGRATION_GUIDE.md](docs/INTEGRATION_GUIDE.md)
+- Operations and rollout checks: [docs/OPERATIONS.md](docs/OPERATIONS.md)
 
 Existing BCMR indexer consumers can switch the base URL from the Python `bcmr-indexer` service to TokenIndex without changing their request paths. Native integrations should prefer the `/v1/...` routes.
 
-## Docs
-
-- Full blueprint and API contract: [docs/BLUEPRINT.md](docs/BLUEPRINT.md)
-- Operations, SLOs, and load testing: [docs/OPERATIONS.md](docs/OPERATIONS.md)
 - Schema migrations:
   - [migrations/0001_init.sql](migrations/0001_init.sql)
   - [migrations/0003_activity_indexes.sql](migrations/0003_activity_indexes.sql)
   - [migrations/0004_bcmr.sql](migrations/0004_bcmr.sql)
 
-## Endpoints
-
-- `GET /health`
-- `GET /health/details`
-- `GET /metrics`
-- `GET /v1/token/:category`
-- `GET /v1/token/:category/summary`
-- `GET /v1/bcmr/:category`
-- `GET /v1/token/:category/bcmr`
-- `GET /v1/token/:category/authchain/head`
-- `GET /v1/token/:category/nfts?limit=100&cursor=...`
-- `GET /v1/token/:category/holders/top?n=50`
-- `GET /v1/token/:category/holders?limit=100&cursor=...`
-- `GET /v1/token/:category/holder/:address`
-- `GET /v1/address/:address/tokens`
-- `GET /v1/token/:category/mempool?n=20`
-- `GET /v1/token/:category/insights`
-
-Legacy BCMR-compatible routes:
-
-- `GET /api/status/latest-block`
-- `GET /api/tokens/:category`
-- `GET /api/registries/:category/latest`
-- `GET /api/registry/:category/identity-snapshot`
-- `GET /api/cashtokens/:category`
-
-All core holder/token endpoints now return unified values in a single response:
+All core holder/token endpoints return unified values in a single response:
 
 - `confirmed_*`
 - `unconfirmed_*`
 - `effective_*` (`confirmed + unconfirmed`)
 
-The native token summary also includes BCMR metadata and authchain provenance when available, so common token lookups can usually stop at one call.
+The native token summary includes BCMR metadata and authchain provenance when available, so common token lookups can usually stop at one call.
 
-Native response map:
+Usage notes:
 
-- `GET /v1/token/:category` and `GET /v1/token/:category/summary` return the unified token summary
-- `GET /v1/token/:category/nfts` returns unspent NFT instances for the category
-- `GET /v1/token/:category/bcmr` returns BCMR metadata only
-- `GET /v1/token/:category/authchain/head` returns provenance only
-- `GET /api/...` remains the compatibility surface for BCMR-style consumers
+- `category` path parameters must be 32-byte hex.
+- `address` path parameters use the indexer's accepted holder-address format and are validated as non-empty strings.
+- `limit` query params are clamped server-side:
+  - `tokens/known`: default `200`, max `1000`
+  - `holders/top`: default `50`, max `500`
+  - `holders`, `nfts`, and `address/tokens`: default `100`, max `500`
+  - `mempool`: default `20`, max `200`
+- `holders` and `nfts` cursors are base64url-encoded JSON payloads.
+- Polling clients should send `If-None-Match`; the API supports `304 Not Modified`.
 
 ## Production Notes
 

@@ -1,5 +1,7 @@
 # TokenIndex Getting Started
 
+Use [README.md](../README.md) as the canonical entry point. This guide is the shortest reliable path to run TokenIndex locally and confirm it is ready for integration.
+
 This is the shortest reliable path to run TokenIndex locally and confirm it is ready for integration.
 
 ## 1. Prerequisites
@@ -85,7 +87,11 @@ What to verify in `/health/details`:
 ## 5. Data Checks
 
 ```bash
+CATEGORY=<token_category_hex>
+
 curl -sS "http://127.0.0.1:8080/v1/tokens/known?limit=5"
+curl -sS "http://127.0.0.1:8080/v1/token/$CATEGORY"
+curl -sS "http://127.0.0.1:8080/v1/token/$CATEGORY/insights"
 ```
 
 Public deployment:
@@ -93,6 +99,7 @@ Public deployment:
 ```bash
 curl -sS "https://tokenindex.optnlabs.com/v1/tokens/known?limit=5"
 curl -sS "https://tokenindex.optnlabs.com/api/status/latest-block"
+curl -sS "https://tokenindex.optnlabs.com/v1/token/$CATEGORY/mempool?n=20"
 ```
 
 If you already know a category:
@@ -102,6 +109,7 @@ CATEGORY=<token_category_hex>
 curl -sS "http://127.0.0.1:8080/v1/token/$CATEGORY"
 curl -sS "http://127.0.0.1:8080/v1/token/$CATEGORY/summary"
 curl -sS "http://127.0.0.1:8080/v1/token/$CATEGORY/holders/top?n=10"
+curl -sS "http://127.0.0.1:8080/v1/token/$CATEGORY/holder/<cashaddr_or_indexed_address>"
 ```
 
 Optional smoke script:
@@ -119,6 +127,8 @@ Compatibility note:
 
 - Existing `bcmr-indexer` clients can point their base URL at `https://tokenindex.optnlabs.com/api` and keep the same request paths.
 - New integrations should use the native `/v1/...` routes.
+- The native `/v1/...` surface includes token discovery, summary, holders, holder eligibility, address inventory, BCMR, authchain head, mempool, and insights routes.
+- Swagger UI is available at `https://tokenindex.optnlabs.com/docs`, backed by `https://tokenindex.optnlabs.com/openapi.json` and self-hosted assets under `/swagger-ui-assets`.
 
 ## 6. Quick Troubleshooting
 

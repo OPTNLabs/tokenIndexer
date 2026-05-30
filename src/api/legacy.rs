@@ -26,7 +26,7 @@ pub struct LegacyCommitmentPath {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct LegacyTxoPath {
+pub struct LegacyRegistryTxoPath {
     txo: String,
 }
 
@@ -164,12 +164,16 @@ pub async fn registries_latest(
 
 pub async fn registries_txo(
     State(state): State<Arc<AppState>>,
-    Path(path): Path<LegacyTxoPath>,
+    Path(path): Path<LegacyRegistryTxoPath>,
 ) -> Response {
     let Some((txid, vout)) = parse_txo_path(&path.txo) else {
         return StatusCode::UNPROCESSABLE_ENTITY.into_response();
     };
-    match fetch_registry_by_txo(&state, &txid, vout).await {
+    registry_txo_response(&state, &txid, vout).await
+}
+
+async fn registry_txo_response(state: &Arc<AppState>, txid: &str, vout: i32) -> Response {
+    match fetch_registry_by_txo(state, txid, vout).await {
         Ok(Some(row)) => Json(row.contents.unwrap_or(Value::Null)).into_response(),
         Ok(None) => not_found(),
         Err(err) => internal_error(err),
@@ -181,7 +185,13 @@ pub async fn bcmr_contents(
     Path(category): Path<String>,
 ) -> Response {
     match fetch_registry_by_category(&state, &category).await {
-        Ok(Some(row)) => Json(row.contents.unwrap_or(Value::Null)).into_response(),
+        Ok(Some(row)) => match row.contents {
+            Some(contents) => Json(contents).into_response(),
+            None => json_error(
+                StatusCode::NOT_FOUND,
+                json!({ "error": "Registry identity found, but with no contents" }),
+            ),
+        },
         Ok(None) => json_error(
             StatusCode::NOT_FOUND,
             json!({ "error": "Registry not found" }),
@@ -363,10 +373,10 @@ pub async fn registry(
 ) -> Response {
     match fetch_registry_by_category(&state, &category).await {
         Ok(Some(row)) => {
-            let include_identities = is_true(query.include_identities.as_deref());
-            Json(build_registry_summary(&row, include_identities)).into_response()
+            let _ = query.include_identities;
+            Json(row.contents.unwrap_or(Value::Null)).into_response()
         }
-        Ok(None) => Json(Value::Null).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => internal_error(err),
     }
 }
@@ -434,7 +444,8 @@ pub async fn registry_parse_bytecode(
 ) -> Response {
     match fetch_registry_by_category(&state, &category).await {
         Ok(Some(row)) => {
-            let bytecode = identity_snapshot_for_row(&row).and_then(|snapshot| {
+            let snapshot = identity_snapshot_for_row(&row);
+            let bytecode = snapshot.as_ref().and_then(|snapshot| {
                 snapshot
                     .get("token")
                     .and_then(|v| v.get("nfts"))
@@ -443,10 +454,18 @@ pub async fn registry_parse_bytecode(
                     .cloned()
             });
             match bytecode {
-                Some(bytecode) => {
-                    Json(json!({ "bytecode": bytecode, "_meta": registry_meta(&row) }))
-                        .into_response()
-                }
+                Some(bytecode) => Json(json!({
+                    "bytecode": bytecode,
+                    "_meta": {
+                        "registry_id": row.registry_id,
+                        "authbase": row.authbase_hex.clone().unwrap_or_default(),
+                        "identity_history": row
+                            .latest_revision
+                            .map(|ts| ts.to_rfc3339_opts(SecondsFormat::Millis, true)),
+                        "category": row.category.clone().unwrap_or(category),
+                    }
+                }))
+                .into_response(),
                 None => Json(Value::Null).into_response(),
             }
         }
@@ -974,6 +993,7 @@ pub(crate) async fn rpc_for_category(
     )
 }
 
+#[allow(dead_code)]
 fn build_registry_summary(row: &LegacyRegistryRow, include_identities: bool) -> Value {
     let contents = row.contents.clone().unwrap_or(Value::Null);
     let mut out = Map::new();

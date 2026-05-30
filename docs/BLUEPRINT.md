@@ -1,5 +1,7 @@
 # TokenIndex Technical Blueprint
 
+Start with [README.md](../README.md) for the canonical landing page, public URLs, and doc navigation. This document is the detailed route and storage contract.
+
 ## 1) Architecture Overview
 
 `TokenIndex` is a CashTokens-only indexer + REST API service.
@@ -144,13 +146,58 @@ Order:
 
 Base path: `/v1`
 
-### 1. `GET /v1/token/:category/summary`
+Route surface:
 
-Response:
+| Route | Purpose | Query params | Notes |
+| --- | --- | --- | --- |
+| `GET /v1/tokens/known` | Discovery list of active indexed tokens | `limit=200` default, max `1000` | Sorted by holder count, then updated height |
+| `GET /v1/token/:category` | Native token summary | none | Alias of `/summary`; includes BCMR + authchain when available |
+| `GET /v1/token/:category/summary` | Native token summary alias | none | Same response as `/v1/token/:category` |
+| `GET /v1/token/:category/bcmr` | BCMR metadata only | none | Alias of `/v1/bcmr/:category` |
+| `GET /v1/bcmr/:category` | BCMR metadata | none | Includes registry provenance and validation fields |
+| `GET /v1/token/:category/authchain/head` | Provenance head | none | Alias of legacy authchain head lookup |
+| `GET /v1/token/:category/holders/top` | Top holders list | `n=50` default, max `500` | Returned as `holders[]` |
+| `GET /v1/token/:category/holders` | Paged holders list | `limit=100` default, max `500`, `cursor` | Cursor is base64url JSON |
+| `GET /v1/token/:category/nfts` | Paged NFT inventory | `limit=100` default, max `500`, `cursor` | Cursor is base64url JSON |
+| `GET /v1/token/:category/holder/:address` | Holder eligibility | none | Returns confirmed + unconfirmed + effective balances |
+| `GET /v1/address/:address/tokens` | Address token inventory | `limit=100` default, max `500` | Returns token list for the address |
+| `GET /v1/token/:category/mempool` | Category mempool overlay | `n=20` default, max `200` | Snapshot-driven overlay only |
+| `GET /v1/token/:category/insights` | Distribution and recent activity | none | Aggregates summary, concentration, activity, and mempool overlay |
+
+### Route Semantics
+
+- `category` path parameters must be 32-byte hex.
+- `address` path parameters must be non-empty and accepted by the holder lookup logic.
+- `holders` cursor payload:
+```json
+{ "balance": "...", "utxo_count": 1, "locking_bytecode": "..." }
+```
+- `nfts` cursor payload:
+```json
+{ "commitment": "...", "capability": 0, "locking_bytecode": "...", "txid": "...", "vout": 1 }
+```
+- Summary response fields include:
+  - `category`, `chain`, `name`, `symbol`
+  - `total_supply`, `confirmed`, `unconfirmed`, `effective`
+  - `holder_count`, `utxo_count`, `updated_height`, `updated_at`
+  - `bcmr` and `authchain_head` when available
+- `holders` and `address/tokens` responses include confirmed/unconfirmed/effective balance and UTXO fields.
+- `mempool` returns `tx_count`, `ft_credits`, `ft_debits`, `net_ft_delta`, `utxo_delta`, `nft_count`, and `holders_top_delta`.
+- `insights` returns `summary`, `bcmr`, `distribution`, `activity`, and `mempool_overlay`.
+
+### Response Examples
+
+`GET /v1/token/:category`
 ```json
 {
   "category": "<hex>",
+  "chain": "chipnet",
+  "name": "Token Name",
+  "symbol": "TOKEN",
   "total_supply": "12345678901234567890",
+  "confirmed": "12345678901234500000",
+  "unconfirmed": "67890",
+  "effective": "12345678901234567890",
   "holder_count": 1200,
   "utxo_count": 3410,
   "updated_height": 850123,
@@ -158,9 +205,7 @@ Response:
 }
 ```
 
-### 2. `GET /v1/token/:category/holders/top?n=50`
-
-Response:
+`GET /v1/token/:category/holders/top?n=50`
 ```json
 {
   "holders": [
@@ -174,12 +219,7 @@ Response:
 }
 ```
 
-### 3. `GET /v1/token/:category/holders?limit=100&cursor=...`
-
-- Keyset order: `ft_balance DESC, locking_bytecode ASC`
-- Cursor payload: base64url JSON `{ "balance": "...", "locking_bytecode": "..." }`
-
-Response:
+`GET /v1/token/:category/holders?limit=100&cursor=...`
 ```json
 {
   "holders": [
@@ -190,29 +230,11 @@ Response:
       "updated_height": 850123
     }
   ],
-  "next_cursor": "eyJiYWxhbmNlIjoiMTAwMCIsImxvY2tpbmdfYnl0ZWNvZGUiOiIuLi4ifQ"
+  "next_cursor": "eyJiYWxhbmNlIjoiMTAwMCIsInV0eG9fY291bnQiOjIsImxvY2tpbmdfYnl0ZWNvZGUiOiIuLi4ifQ"
 }
 ```
 
-### 4. `GET /v1/token/:category/holder/:address`
-
-Response:
-```json
-{
-  "eligible": true,
-  "ft_balance": "500",
-  "utxo_count": 1,
-  "updated_height": 850123
-}
-```
-
-### 5. `GET /v1/token/:category/nfts?limit=100&cursor=...`
-
-- Returns one row per unspent NFT UTXO in the category
-- Stable keyset order: `nft_commitment ASC, nft_capability ASC, locking_bytecode ASC, txid ASC, vout ASC`
-- Cursor payload: base64url JSON with the last row’s commitment, capability, locking bytecode, txid, and vout
-
-Response:
+`GET /v1/token/:category/nfts?limit=100&cursor=...`
 ```json
 {
   "nfts": [
@@ -233,9 +255,7 @@ Response:
 }
 ```
 
-### 6. `GET /v1/address/:address/tokens`
-
-Response:
+`GET /v1/address/:address/tokens`
 ```json
 {
   "tokens": [
@@ -249,9 +269,7 @@ Response:
 }
 ```
 
-### 7. `GET /v1/bcmr/:category`
-
-Response:
+`GET /v1/bcmr/:category`
 ```json
 {
   "category": "<hex>",
@@ -286,8 +304,8 @@ Response:
 ### Status Codes + Errors
 
 - `200` success
-- `400` invalid category/cursor/limit
-- `404` unknown token for summary
+- `400` invalid category, address, cursor, or limit
+- `404` token summary not indexed
 - `404` no resolved BCMR metadata for `/v1/bcmr/:category`
 - `429` rate limited
 - `500` internal
@@ -306,8 +324,9 @@ Error shape:
 
 - ETag formula: `hash(route + canonical_params + updated_height + dataset_version)`
 - `Cache-Control`:
+  - `tokens/known`: `public, max-age=20, stale-while-revalidate=30`
+  - summary and holders: `public, max-age=10-30, stale-while-revalidate=30`
   - eligibility: `public, max-age=5, stale-while-revalidate=30`
-  - holders/summary: `public, max-age=10-30, stale-while-revalidate=30`
 - support `If-None-Match` -> `304`
 
 ## 5) Performance + Scaling Plan

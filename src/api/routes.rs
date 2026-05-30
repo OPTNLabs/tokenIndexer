@@ -353,7 +353,12 @@ pub async fn rate_limit_middleware(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    if path.starts_with("/health") || path == "/metrics" {
+    if path.starts_with("/health")
+        || path == "/metrics"
+        || path == "/openapi.json"
+        || path == "/docs"
+        || path.starts_with("/swagger-ui")
+    {
         return next.run(request).await;
     }
 
@@ -397,7 +402,11 @@ pub async fn security_middleware(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    if path.starts_with("/health") {
+    if path.starts_with("/health")
+        || path == "/openapi.json"
+        || path == "/docs"
+        || path.starts_with("/swagger-ui")
+    {
         return next.run(request).await;
     }
 

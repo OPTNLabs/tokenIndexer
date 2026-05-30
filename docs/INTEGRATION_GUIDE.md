@@ -1,5 +1,7 @@
 # TokenIndex Integration Guide
 
+Use [README.md](../README.md) as the canonical entry point for links and public URLs. This guide focuses on integration patterns and client behavior.
+
 Use this when wiring TokenIndex into a backend, frontend, or mobile API layer.
 
 ## 1. Base URL and Auth
@@ -14,54 +16,24 @@ Authorization: Bearer <token>
 
 ## 2. Recommended Call Sequence
 
-1. `GET /health`
-2. `GET /v1/tokens/known?limit=50`
-3. `GET /v1/token/:category`
-4. `GET /v1/token/:category/holders/top?n=50`
-5. `GET /v1/token/:category/holder/:address`
-6. `GET /v1/address/:address/tokens?limit=100`
-7. Optional metadata: `GET /v1/token/:category/bcmr`
-8. Optional provenance: `GET /v1/token/:category/authchain/head`
+1. Start with `GET /health`.
+2. Resolve the summary with `GET /v1/token/:category` or `GET /v1/token/:category/summary`.
+3. Add holders, address balances, and provenance only if the UI needs them.
+4. Load `bcmr`, `mempool`, and `insights` lazily because they are auxiliary views.
 
-## 2b. Supported Surface
-
-| Route family | Purpose | Support level |
-| --- | --- | --- |
-| `/v1/token/:category` | Native token summary with BCMR + provenance when available | Primary |
-| `/v1/token/:category/holders*` | Holder balances and eligibility | Primary |
-| `/v1/address/:address/tokens` | Address-centric token inventory | Primary |
-| `/v1/bcmr/:category` | Native BCMR metadata lookup | Primary |
-| `/v1/token/:category/bcmr` | BCMR-only convenience alias | Primary |
-| `/v1/token/:category/authchain/head` | Provenance-only convenience alias | Primary |
-| `/api/bcmr/*` | BCMR compatibility surface for legacy clients | Compatibility |
-| `/api/registry/*` | Registry/identity snapshot compatibility surface | Compatibility |
-| `/api/tokens/*` | Legacy token metadata compatibility surface | Compatibility |
-| `/api/cashtokens/*` | Legacy cashtokens compatibility surface | Compatibility |
-| `/api/status/latest-block` | Legacy status check | Compatibility |
-
-Anything not listed above should be treated as native-only or unsupported unless explicitly documented later.
+For the full route inventory, response matrix, and field semantics, use [docs/BLUEPRINT.md](./BLUEPRINT.md). For public URLs and release navigation, use [README.md](../README.md).
 
 ## 3. Behaviors to Model Correctly
 
-- Token balances are strings (large integers).
+- Token balances are strings.
 - Summary includes `confirmed`, `unconfirmed`, and `effective` fields.
-- Token summary also includes BCMR metadata and `authchain_head` when available.
-- Holder responses include confirmed/unconfirmed/effective balance + UTXO fields.
-- Paged holders endpoint uses cursor (`limit` + `cursor`).
-
-### Native summary shape
-
-`GET /v1/token/:category` is the preferred single-call entry point for most token lookups. The response includes:
-
-- token identity fields: `category`, `name`, `symbol`, `chain`
-- balance fields: `total_supply`, `confirmed`, `unconfirmed`, `effective`
-- state fields: `holder_count`, `utxo_count`, `updated_height`, `updated_at`
-- BCMR fields when available: `bcmr.name`, `bcmr.symbol`, `bcmr.description`, `bcmr.decimals`, `bcmr.uris`, `bcmr.registry`
-- provenance fields when available: `authchain_head.txid`, `authchain_head.owner`
-
-If callers need only BCMR metadata, use `GET /v1/token/:category/bcmr`.
-If callers need only provenance, use `GET /v1/token/:category/authchain/head`.
-For legacy BCMR consumers, keep using `/api/...` and switch only the base URL.
+- The summary response can include BCMR metadata and `authchain_head` when available.
+- Holder responses include balance and UTXO fields.
+- Paged holders and NFT endpoints use cursor pagination.
+- `tokens/known` returns the highest-holder-count tokens, capped server-side.
+- `mempool` and `insights` are read-only overlays derived from the latest mempool snapshot.
+- Cursor payloads are base64url-encoded JSON.
+- Exact route shapes, limit defaults, and example payloads live in [docs/BLUEPRINT.md](./BLUEPRINT.md).
 
 ## 4. Minimal cURL Smoke
 
@@ -75,10 +47,15 @@ curl -sS "$BASE_URL/v1/tokens/known?limit=10"
 curl -sS "$BASE_URL/v1/token/$CATEGORY"
 curl -sS "$BASE_URL/v1/token/$CATEGORY/summary"
 curl -sS "$BASE_URL/v1/token/$CATEGORY/holders/top?n=5"
+curl -sS "$BASE_URL/v1/token/$CATEGORY/holders?limit=5"
+curl -sS "$BASE_URL/v1/token/$CATEGORY/nfts?limit=5"
 curl -sS "$BASE_URL/v1/token/$CATEGORY/holder/$ADDRESS"
 curl -sS "$BASE_URL/v1/address/$ADDRESS/tokens?limit=25"
 curl -sS "$BASE_URL/v1/token/$CATEGORY/bcmr"
+curl -sS "$BASE_URL/v1/bcmr/$CATEGORY"
 curl -sS "$BASE_URL/v1/token/$CATEGORY/authchain/head"
+curl -sS "$BASE_URL/v1/token/$CATEGORY/mempool?n=20"
+curl -sS "$BASE_URL/v1/token/$CATEGORY/insights"
 ```
 
 ## 5. JavaScript/TypeScript Client Snippet
@@ -111,6 +88,7 @@ export async function loadToken(categoryHex: string) {
 - Poll summary every `5-15s`
 - Poll holders every `15-30s`
 - Poll BCMR every `5-30m`
+- Poll mempool and insights only when the UI exposes those views; otherwise keep them on-demand
 
 Use `ETag`/`If-None-Match` and handle `304 Not Modified`.
 
@@ -119,7 +97,7 @@ Use `ETag`/`If-None-Match` and handle `304 Not Modified`.
 - `400`: bad category/address/cursor
 - `401`: missing/invalid bearer token
 - `403`: IP blocked by allowlist
-- `404`: not found
+- `404`: not found (`/v1/token/:category` and `/v1/bcmr/:category`)
 - `429`: rate-limited
 - `500`: server/db failure
 
@@ -128,8 +106,10 @@ Retry only transient failures (`429`, `500`, network timeout).
 ## 8. Ship Checklist
 
 - Health endpoints are green
-- App can load `tokens/known`
+- `tokens/known` loads successfully
+- NFT pagination works for supported categories
 - Summary + holders + address token list render correctly
 - `GET /v1/token/:category` returns BCMR + authchain provenance when available
+- `GET /v1/token/:category/insights` and `GET /v1/token/:category/mempool` work for supported categories
 - Retry/backoff logic in place
 - Auth behavior tested (if enabled)

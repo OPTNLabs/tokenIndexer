@@ -1,5 +1,7 @@
 # TokenIndex Operations
 
+Use [README.md](../README.md) as the canonical entry point for doc links and public URLs. This page focuses on operations, SLOs, and rollout checks.
+
 ## SLO Targets
 
 - Hot endpoints (cache hit): p95 < 10ms
@@ -88,6 +90,8 @@ Useful ingest-specific `/metrics` series:
 
 ```bash
 curl -sS http://127.0.0.1:8080/health
+curl -sS "http://127.0.0.1:8080/v1/tokens/known?limit=3"
+curl -sS "http://127.0.0.1:8080/v1/token/<category-hex>"
 curl -sS "http://127.0.0.1:8080/v1/bcmr/<category-hex>"
 curl -sS "http://127.0.0.1:8080/api/tokens/<category-hex>"
 curl -sS "http://127.0.0.1:8080/api/registries/<category-hex>/latest"
@@ -286,6 +290,7 @@ curl -sS "https://tokenindex.optnlabs.com/api/status/latest-block"
 curl -sS "https://tokenindex.optnlabs.com/api/tokens/<category-hex>"
 curl -sS "https://tokenindex.optnlabs.com/v1/token/<category-hex>/bcmr"
 curl -sS "https://tokenindex.optnlabs.com/v1/token/<category-hex>/authchain/head"
+curl -sS "https://tokenindex.optnlabs.com/v1/token/<category-hex>/insights"
 ```
 
 Rollback is commit-based:
@@ -300,6 +305,6 @@ docker compose -p tokenindexer up -d --build
 
 1. Confirm cache hit ratio remains high after rollout (`/metrics`).
 2. Confirm p95 latency regression-free for:
-`/v1/token/:category/summary`, `/holders/top`, `/holders`, `/holder/:address`, `/insights`.
+`/v1/token/:category`, `/v1/token/:category/summary`, `/holders/top`, `/holders`, `/holder/:address`, `/insights`.
 3. Confirm ingest stays near tip while load test runs.
 4. Confirm replica lag remains within target if read replica is enabled.
